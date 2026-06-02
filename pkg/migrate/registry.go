@@ -4,6 +4,7 @@ import (
 	"github.com/opendatahub-io/odh-cli/pkg/migrate/action"
 	"github.com/opendatahub-io/odh-cli/pkg/migrate/actions/aipipelines"
 	"github.com/opendatahub-io/odh-cli/pkg/migrate/actions/kueue/rhbok"
+	"github.com/opendatahub-io/odh-cli/pkg/migrate/actions/llamastack/backup"
 	"github.com/opendatahub-io/odh-cli/pkg/migrate/actions/modelserving"
 	"github.com/opendatahub-io/odh-cli/pkg/migrate/actions/training"
 	"github.com/opendatahub-io/odh-cli/pkg/migrate/actions/trustyai/data"
@@ -33,6 +34,7 @@ func newDefaultRegistry() *action.ActionRegistry {
 	registry.MustRegister(&metrics.MetricsAction{})
 	registry.MustRegister(&data.DataAction{})
 	registry.MustRegister(&training.VerifyWorkloadsAction{})
+	registry.MustRegister(&backup.LlamaStackBackupAction{})
 
 	return registry
 }

@@ -128,7 +128,7 @@ func NewCommand(
 	registry.MustRegister(openshift.NewCheck())
 	registry.MustRegister(servicemesh.NewCheck())
 
-	// Workloads (20)
+	// Workloads (21)
 	registry.MustRegister(ray.NewAppWrapperCleanupCheck())
 	registry.MustRegister(datasciencepipelinesworkloads.NewInstructLabRemovalCheck())
 	registry.MustRegister(datasciencepipelinesworkloads.NewStoredVersionRemovalCheck())
@@ -140,6 +140,7 @@ func NewCommand(
 	registry.MustRegister(kserveworkloads.NewImpactedWorkloadsCheck())
 	registry.MustRegister(kueueworkloads.NewDataIntegrityCheck())
 	registry.MustRegister(llamastackworkloads.NewConfigCheck())
+	registry.MustRegister(llamastackworkloads.NewMigrationCheck())
 	registry.MustRegister(notebook.NewAcceleratorMigrationCheck())
 	registry.MustRegister(notebook.NewContainerNameCheck())
 	registry.MustRegister(notebook.NewHardwareProfileMigrationCheck())

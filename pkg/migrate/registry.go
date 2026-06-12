@@ -5,6 +5,7 @@ import (
 	"github.com/opendatahub-io/odh-cli/pkg/migrate/actions/aipipelines"
 	"github.com/opendatahub-io/odh-cli/pkg/migrate/actions/kueue/rhbok"
 	"github.com/opendatahub-io/odh-cli/pkg/migrate/actions/modelserving"
+	"github.com/opendatahub-io/odh-cli/pkg/migrate/actions/training"
 	"github.com/opendatahub-io/odh-cli/pkg/migrate/actions/trustyai/data"
 	"github.com/opendatahub-io/odh-cli/pkg/migrate/actions/trustyai/deadlock"
 	"github.com/opendatahub-io/odh-cli/pkg/migrate/actions/trustyai/guardrails"
@@ -31,6 +32,7 @@ func newDefaultRegistry() *action.ActionRegistry {
 	registry.MustRegister(&otelexporter.MigrateOtelExporterAction{})
 	registry.MustRegister(&metrics.MetricsAction{})
 	registry.MustRegister(&data.DataAction{})
+	registry.MustRegister(&training.VerifyWorkloadsAction{})
 
 	return registry
 }

@@ -173,12 +173,12 @@ func checkCodeflareOperator(ctx context.Context, c client.Client, autoRemove boo
 }
 
 func patchCodeflareToRemoved(ctx context.Context, c client.Client) error {
-	err := wait.ExponentialBackoff(wait.Backoff{
+	err := wait.ExponentialBackoffWithContext(ctx, wait.Backoff{
 		Duration: retryInitialDuration,
 		Factor:   retryFactor,
 		Jitter:   retryJitter,
 		Steps:    retryMaxSteps,
-	}, func() (bool, error) {
+	}, func(ctx context.Context) (bool, error) {
 		latestDSC, err := client.GetDataScienceCluster(ctx, c)
 		if err != nil {
 			return false, fmt.Errorf("getting DataScienceCluster: %w", err)

@@ -105,23 +105,38 @@ func (c *PrepareCommand) Complete() error {
 
 	// Set default output directory if not specified
 	if c.OutputDir == "" {
-		timestamp := time.Now().Format("20060102-150405")
-
-		defaultDir, err := os.MkdirTemp(".", "backup-migrate-"+timestamp+"-*")
+		dir, err := defaultBackupDir()
 		if err != nil {
-			defaultDir, err = os.MkdirTemp(
-				"/tmp/rhoai-upgrade-backup",
-				"backup-migrate-"+timestamp+"-*",
-			)
-			if err != nil {
-				return fmt.Errorf("creating default backup directory: %w", err)
-			}
+			return err
 		}
 
-		c.OutputDir = defaultDir
+		c.OutputDir = dir
 	}
 
 	return nil
+}
+
+const fallbackBackupParentDir = "/tmp/rhoai-upgrade-backup"
+
+func defaultBackupDir() (string, error) {
+	pattern := "backup-migrate-" + time.Now().Format("20060102-150405") + "-*"
+
+	dir, err := os.MkdirTemp(".", pattern)
+	if err == nil {
+		return dir, nil
+	}
+
+	//nolint:mnd // standard directory permission for shared backup location
+	if mkErr := os.MkdirAll(fallbackBackupParentDir, 0o750); mkErr != nil {
+		return "", fmt.Errorf("creating fallback backup parent directory: %w", mkErr)
+	}
+
+	dir, err = os.MkdirTemp(fallbackBackupParentDir, pattern)
+	if err != nil {
+		return "", fmt.Errorf("creating default backup directory: %w", err)
+	}
+
+	return dir, nil
 }
 
 func (c *PrepareCommand) Validate() error {

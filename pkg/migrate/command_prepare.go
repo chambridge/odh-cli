@@ -107,7 +107,16 @@ func (c *PrepareCommand) Complete() error {
 	// Set default output directory if not specified
 	if c.OutputDir == "" {
 		timestamp := time.Now().Format("20060102-150405")
-		c.OutputDir = filepath.Join(".", "backup-migrate-"+timestamp)
+		defaultDir := filepath.Join(".", "backup-migrate-"+timestamp)
+
+		if f, err := os.CreateTemp(".", ".rhai-cli-probe-*"); err != nil {
+			defaultDir = filepath.Join("/tmp/rhoai-upgrade-backup", "backup-migrate-"+timestamp)
+		} else {
+			_ = f.Close()
+			_ = os.Remove(f.Name())
+		}
+
+		c.OutputDir = defaultDir
 	}
 
 	return nil

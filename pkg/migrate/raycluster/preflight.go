@@ -184,6 +184,13 @@ func patchCodeflareToRemoved(ctx context.Context, c client.Client) error {
 			return false, fmt.Errorf("getting DataScienceCluster: %w", err)
 		}
 
+		currentState, _ := jq.Query[string](latestDSC, ".spec.components.codeflare.managementState")
+		currentState = strings.ToLower(currentState)
+
+		if currentState == "removed" || currentState == "unmanaged" {
+			return true, nil
+		}
+
 		if err := jq.Transform(latestDSC, `.spec.components.codeflare.managementState = "Removed"`); err != nil {
 			return false, fmt.Errorf("setting codeflare managementState: %w", err)
 		}

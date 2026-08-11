@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/blang/semver/v4"
@@ -107,13 +106,16 @@ func (c *PrepareCommand) Complete() error {
 	// Set default output directory if not specified
 	if c.OutputDir == "" {
 		timestamp := time.Now().Format("20060102-150405")
-		defaultDir := filepath.Join(".", "backup-migrate-"+timestamp)
 
-		if f, err := os.CreateTemp(".", ".rhai-cli-probe-*"); err != nil {
-			defaultDir = filepath.Join("/tmp/rhoai-upgrade-backup", "backup-migrate-"+timestamp)
-		} else {
-			_ = f.Close()
-			_ = os.Remove(f.Name())
+		defaultDir, err := os.MkdirTemp(".", "backup-migrate-"+timestamp+"-*")
+		if err != nil {
+			defaultDir, err = os.MkdirTemp(
+				"/tmp/rhoai-upgrade-backup",
+				"backup-migrate-"+timestamp+"-*",
+			)
+			if err != nil {
+				return fmt.Errorf("creating default backup directory: %w", err)
+			}
 		}
 
 		c.OutputDir = defaultDir

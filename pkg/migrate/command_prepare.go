@@ -116,8 +116,6 @@ func (c *PrepareCommand) Complete() error {
 	return nil
 }
 
-const fallbackBackupParentDir = "/tmp/rhoai-upgrade-backup"
-
 func defaultBackupDir() (string, error) {
 	pattern := "backup-migrate-" + time.Now().Format("20060102-150405") + "-*"
 
@@ -126,12 +124,7 @@ func defaultBackupDir() (string, error) {
 		return dir, nil
 	}
 
-	//nolint:mnd // standard directory permission for shared backup location
-	if mkErr := os.MkdirAll(fallbackBackupParentDir, 0o750); mkErr != nil {
-		return "", fmt.Errorf("creating fallback backup parent directory: %w", mkErr)
-	}
-
-	dir, err = os.MkdirTemp(fallbackBackupParentDir, pattern)
+	dir, err = os.MkdirTemp("", pattern)
 	if err != nil {
 		return "", fmt.Errorf("creating default backup directory: %w", err)
 	}

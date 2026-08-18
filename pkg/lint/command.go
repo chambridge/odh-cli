@@ -135,8 +135,9 @@ func NewCommand(
 	registry.MustRegister(sharedossm.NewCheck())
 	registry.MustRegister(sharedserverless.NewCheck())
 
-	// Workloads (21)
+	// Workloads (22)
 	registry.MustRegister(ray.NewAppWrapperCleanupCheck())
+	registry.MustRegister(datasciencepipelinesworkloads.NewCustomRBACAPISubresourceCheck())
 	registry.MustRegister(datasciencepipelinesworkloads.NewInstructLabRemovalCheck())
 	registry.MustRegister(datasciencepipelinesworkloads.NewStoredVersionRemovalCheck())
 	registry.MustRegister(guardrails.NewImpactedWorkloadsCheck())

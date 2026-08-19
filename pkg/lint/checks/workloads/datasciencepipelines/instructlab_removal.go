@@ -45,8 +45,8 @@ func NewInstructLabRemovalCheck() *InstructLabRemovalCheck {
 			Type:             checkTypeInstructLabRemoval,
 			CheckID:          "workloads.datasciencepipelines.instructlab-removal",
 			CheckName:        "Workloads :: DataSciencePipelines :: Deprecated apiServer Managed-Pipelines Fields (3.x)",
-			CheckDescription: "Validates that DSPA objects do not use deprecated apiServer managed-pipelines fields (including instructLab, runtimeGenericImage, toolboxImage, rhelAIImage, and initResources) before upgrading to RHOAI 3.x",
-			CheckRemediation: "Remove deprecated '.spec.apiServer' managed-pipelines fields (instructLab, runtimeGenericImage, toolboxImage, rhelAIImage, initResources) from affected DSPA objects before upgrading",
+			CheckDescription: "Validates that DSPA objects do not use deprecated apiServer fields before upgrading to RHOAI 3.x",
+			CheckRemediation: "Remove .spec.apiServer.managedPipelines.instructLab and the deprecated .spec.apiServer fields runtimeGenericImage, toolboxImage, rhelAIImage, and initResources from affected DSPA objects before upgrading",
 		},
 	}
 }

@@ -64,6 +64,66 @@ func TestClassifyRole(t *testing.T) {
 		g.Expect(result.RouteVerbs).To(Equal([]string{"get", "list", "create", "update", "delete"}))
 	})
 
+	t.Run("role with dspa resource under unrelated api group in same rule — still needs fix", func(t *testing.T) {
+		g := NewWithT(t)
+
+		role := makeRoleUnstructured("my-custom-role", "user-ns", []map[string]any{
+			{
+				"apiGroups": []any{"route.openshift.io"},
+				"resources": []any{"routes"},
+				"verbs":     []any{"get"},
+			},
+			{
+				"apiGroups": []any{"example.invalid"},
+				"resources": []any{"datasciencepipelinesapplications/api"},
+				"verbs":     []any{"get"},
+			},
+		})
+
+		result := rbac.ClassifyRole(&role)
+		g.Expect(result.NeedsFix).To(BeTrue())
+	})
+
+	t.Run("role with wildcard dspa grant — no fix needed", func(t *testing.T) {
+		g := NewWithT(t)
+
+		role := makeRoleUnstructured("my-custom-role", "user-ns", []map[string]any{
+			{
+				"apiGroups": []any{"route.openshift.io"},
+				"resources": []any{"routes"},
+				"verbs":     []any{"get"},
+			},
+			{
+				"apiGroups": []any{"*"},
+				"resources": []any{"datasciencepipelinesapplications/api"},
+				"verbs":     []any{"get"},
+			},
+		})
+
+		result := rbac.ClassifyRole(&role)
+		g.Expect(result.NeedsFix).To(BeFalse())
+	})
+
+	t.Run("role with wildcard dspa resource — no fix needed", func(t *testing.T) {
+		g := NewWithT(t)
+
+		role := makeRoleUnstructured("my-custom-role", "user-ns", []map[string]any{
+			{
+				"apiGroups": []any{"route.openshift.io"},
+				"resources": []any{"routes"},
+				"verbs":     []any{"get"},
+			},
+			{
+				"apiGroups": []any{"datasciencepipelinesapplications.opendatahub.io"},
+				"resources": []any{"*"},
+				"verbs":     []any{"get"},
+			},
+		})
+
+		result := rbac.ClassifyRole(&role)
+		g.Expect(result.NeedsFix).To(BeFalse())
+	})
+
 	t.Run("role already has dspa subresource — no fix needed", func(t *testing.T) {
 		g := NewWithT(t)
 

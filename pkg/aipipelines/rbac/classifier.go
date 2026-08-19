@@ -6,7 +6,13 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
-const systemNamespacePattern = `^(kube-system|default|openshift.*|redhat-ods-.*)$`
+const (
+	systemNamespacePattern = `^(kube-system|default|openshift.*|redhat-ods-.*)$`
+
+	dspaAPIGroup       = "datasciencepipelinesapplications.opendatahub.io"
+	dspaAPISubresource = "datasciencepipelinesapplications/api"
+	routeAPIGroup      = "route.openshift.io"
+)
 
 var (
 	systemNamespaceRe   = regexp.MustCompile(systemNamespacePattern)
@@ -55,17 +61,14 @@ func ClassifyRole(role *unstructured.Unstructured) Classification {
 		ruleResources, _ := ExtractStringSlice(rule, "resources")
 		verbs, _ := ExtractStringSlice(rule, "verbs")
 
-		for _, g := range apiGroups {
-			if g == "route.openshift.io" {
-				hasRouteAPIGroup = true
-				classification.RouteVerbs = mergeStringSlices(classification.RouteVerbs, verbs)
-			}
+		if containsStringOrWildcard(apiGroups, routeAPIGroup) {
+			hasRouteAPIGroup = true
+			classification.RouteVerbs = mergeStringSlices(classification.RouteVerbs, verbs)
 		}
 
-		for _, res := range ruleResources {
-			if res == "datasciencepipelinesapplications/api" {
-				hasDSPASubresource = true
-			}
+		if containsStringOrWildcard(apiGroups, dspaAPIGroup) &&
+			containsStringOrWildcard(ruleResources, dspaAPISubresource) {
+			hasDSPASubresource = true
 		}
 	}
 
@@ -100,6 +103,16 @@ func ExtractStringSlice(obj map[string]any, key string) ([]string, bool) {
 	}
 
 	return out, len(out) > 0
+}
+
+func containsStringOrWildcard(values []string, target string) bool {
+	for _, v := range values {
+		if v == target || v == "*" {
+			return true
+		}
+	}
+
+	return false
 }
 
 func mergeStringSlices(a, b []string) []string {

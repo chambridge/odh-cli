@@ -190,10 +190,10 @@ func TestCopyToPod(t *testing.T) {
 
 	srcDir := t.TempDir()
 
-	err := os.MkdirAll(filepath.Join(srcDir, testDirName), 0o755)
+	err := os.MkdirAll(filepath.Join(srcDir, testDirName), 0o750)
 	g.Expect(err).ToNot(HaveOccurred())
 
-	err = os.WriteFile(filepath.Join(srcDir, testFileName), []byte(testFileContent), 0o644)
+	err = os.WriteFile(filepath.Join(srcDir, testFileName), []byte(testFileContent), 0o600)
 	g.Expect(err).ToNot(HaveOccurred())
 
 	var received bytes.Buffer

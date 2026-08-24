@@ -1,15 +1,18 @@
-package exec
+package exec_test
 
 import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/opendatahub-io/odh-cli/pkg/util/exec"
 
 	. "github.com/onsi/gomega"
 )
@@ -26,8 +29,8 @@ func TestCopyFromPod_EmptyTar(t *testing.T) {
 	destDir := t.TempDir()
 
 	var writerClosed atomic.Bool
-	executor := &MockExecutor{
-		ExecFn: func(_ context.Context, opts ExecOptions) error {
+	executor := &exec.MockExecutor{
+		ExecFn: func(_ context.Context, opts exec.ExecOptions) error {
 			tw := tar.NewWriter(opts.Stdout)
 			_ = tw.Close()
 
@@ -40,7 +43,7 @@ func TestCopyFromPod_EmptyTar(t *testing.T) {
 		},
 	}
 
-	err := CopyFromPod(t.Context(), executor, CopyOptions{
+	err := exec.CopyFromPod(t.Context(), executor, exec.CopyOptions{
 		Namespace:     "ns",
 		PodName:       "pod",
 		ContainerName: "ctr",
@@ -60,28 +63,27 @@ func TestCopyFromPod_WithFiles(t *testing.T) {
 
 	destDir := t.TempDir()
 
-	executor := &MockExecutor{
-		ExecFn: func(_ context.Context, opts ExecOptions) error {
+	executor := &exec.MockExecutor{
+		ExecFn: func(_ context.Context, opts exec.ExecOptions) error {
 			tw := tar.NewWriter(opts.Stdout)
 
 			content := []byte(testFileContent)
-			err := tw.WriteHeader(&tar.Header{
+			if err := tw.WriteHeader(&tar.Header{
 				Name: testFileName,
-				Mode: tarFilePermission,
+				Mode: 0o644,
 				Size: int64(len(content)),
-			})
-			if err != nil {
-				return err
+			}); err != nil {
+				return fmt.Errorf("writing tar header: %w", err)
 			}
 			if _, err := tw.Write(content); err != nil {
-				return err
+				return fmt.Errorf("writing tar content: %w", err)
 			}
 
 			return tw.Close()
 		},
 	}
 
-	err := CopyFromPod(t.Context(), executor, CopyOptions{
+	err := exec.CopyFromPod(t.Context(), executor, exec.CopyOptions{
 		Namespace:     "ns",
 		PodName:       "pod",
 		ContainerName: "ctr",
@@ -91,7 +93,7 @@ func TestCopyFromPod_WithFiles(t *testing.T) {
 
 	g.Expect(err).ToNot(HaveOccurred())
 
-	data, err := os.ReadFile(filepath.Join(destDir, testFileName))
+	data, err := os.ReadFile(filepath.Join(destDir, testFileName)) //nolint:gosec // Test file path constructed from t.TempDir, not user input.
 	g.Expect(err).ToNot(HaveOccurred())
 	g.Expect(string(data)).To(Equal(testFileContent))
 }
@@ -101,15 +103,15 @@ func TestCopyFromPod_ExtractionError(t *testing.T) {
 
 	destDir := t.TempDir()
 
-	executor := &MockExecutor{
-		ExecFn: func(_ context.Context, opts ExecOptions) error {
+	executor := &exec.MockExecutor{
+		ExecFn: func(_ context.Context, opts exec.ExecOptions) error {
 			_, _ = opts.Stdout.Write([]byte("not a valid tar stream"))
 
 			return nil
 		},
 	}
 
-	err := CopyFromPod(t.Context(), executor, CopyOptions{
+	err := exec.CopyFromPod(t.Context(), executor, exec.CopyOptions{
 		Namespace:     "ns",
 		PodName:       "pod",
 		ContainerName: "ctr",
@@ -128,8 +130,8 @@ func TestCopyFromPod_DrainsPipeBeforeClose(t *testing.T) {
 
 	var pipeWriteErr error
 
-	executor := &MockExecutor{
-		ExecFn: func(_ context.Context, opts ExecOptions) error {
+	executor := &exec.MockExecutor{
+		ExecFn: func(_ context.Context, opts exec.ExecOptions) error {
 			tw := tar.NewWriter(opts.Stdout)
 			_ = tw.Close()
 
@@ -142,7 +144,7 @@ func TestCopyFromPod_DrainsPipeBeforeClose(t *testing.T) {
 		},
 	}
 
-	err := CopyFromPod(t.Context(), executor, CopyOptions{
+	err := exec.CopyFromPod(t.Context(), executor, exec.CopyOptions{
 		Namespace:     "ns",
 		PodName:       "pod",
 		ContainerName: "ctr",
@@ -159,20 +161,19 @@ func TestCopyFromPod_ExcessTrailingData(t *testing.T) {
 
 	destDir := t.TempDir()
 
-	executor := &MockExecutor{
-		ExecFn: func(_ context.Context, opts ExecOptions) error {
+	executor := &exec.MockExecutor{
+		ExecFn: func(_ context.Context, opts exec.ExecOptions) error {
 			tw := tar.NewWriter(opts.Stdout)
 			_ = tw.Close()
 
-			// Write more trailing data than maxTrailingTarBytes to trigger the limit.
-			trailing := bytes.Repeat([]byte{0}, int(maxTrailingTarBytes)+1)
+			trailing := bytes.Repeat([]byte{0}, (1<<20)+1)
 			_, _ = opts.Stdout.Write(trailing)
 
 			return nil
 		},
 	}
 
-	err := CopyFromPod(t.Context(), executor, CopyOptions{
+	err := exec.CopyFromPod(t.Context(), executor, exec.CopyOptions{
 		Namespace:     "ns",
 		PodName:       "pod",
 		ContainerName: "ctr",
@@ -189,22 +190,24 @@ func TestCopyToPod(t *testing.T) {
 
 	srcDir := t.TempDir()
 
-	err := os.MkdirAll(filepath.Join(srcDir, testDirName), tarDirPermission)
+	err := os.MkdirAll(filepath.Join(srcDir, testDirName), 0o755)
 	g.Expect(err).ToNot(HaveOccurred())
 
-	err = os.WriteFile(filepath.Join(srcDir, testFileName), []byte(testFileContent), tarFilePermission)
+	err = os.WriteFile(filepath.Join(srcDir, testFileName), []byte(testFileContent), 0o644)
 	g.Expect(err).ToNot(HaveOccurred())
 
 	var received bytes.Buffer
-	executor := &MockExecutor{
-		ExecFn: func(_ context.Context, opts ExecOptions) error {
-			_, err := io.Copy(&received, opts.Stdin)
+	executor := &exec.MockExecutor{
+		ExecFn: func(_ context.Context, opts exec.ExecOptions) error {
+			if _, err := io.Copy(&received, opts.Stdin); err != nil {
+				return fmt.Errorf("copying stdin: %w", err)
+			}
 
-			return err
+			return nil
 		},
 	}
 
-	err = CopyToPod(t.Context(), executor, CopyOptions{
+	err = exec.CopyToPod(t.Context(), executor, exec.CopyOptions{
 		Namespace:     "ns",
 		PodName:       "pod",
 		ContainerName: "ctr",
@@ -231,27 +234,38 @@ func TestCopyToPod(t *testing.T) {
 	g.Expect(names).To(ContainElement(testDirName))
 }
 
-func TestExtractTar_DirectoryTraversal(t *testing.T) {
+func TestCopyFromPod_DirectoryTraversal(t *testing.T) {
 	g := NewWithT(t)
 
-	var buf bytes.Buffer
-	tw := tar.NewWriter(&buf)
-
-	err := tw.WriteHeader(&tar.Header{
-		Name: "../../etc/passwd",
-		Mode: tarFilePermission,
-		Size: 4,
-	})
-	g.Expect(err).ToNot(HaveOccurred())
-
-	_, err = tw.Write([]byte("evil"))
-	g.Expect(err).ToNot(HaveOccurred())
-
-	err = tw.Close()
-	g.Expect(err).ToNot(HaveOccurred())
-
 	destDir := t.TempDir()
-	err = extractTar(&buf, destDir)
+
+	executor := &exec.MockExecutor{
+		ExecFn: func(_ context.Context, opts exec.ExecOptions) error {
+			tw := tar.NewWriter(opts.Stdout)
+
+			if err := tw.WriteHeader(&tar.Header{
+				Name: "../../etc/passwd",
+				Mode: 0o644,
+				Size: 4,
+			}); err != nil {
+				return fmt.Errorf("writing tar header: %w", err)
+			}
+
+			if _, err := tw.Write([]byte("evil")); err != nil {
+				return fmt.Errorf("writing tar content: %w", err)
+			}
+
+			return tw.Close()
+		},
+	}
+
+	err := exec.CopyFromPod(t.Context(), executor, exec.CopyOptions{
+		Namespace:     "ns",
+		PodName:       "pod",
+		ContainerName: "ctr",
+		PodPath:       "/data",
+		LocalPath:     destDir,
+	})
 
 	g.Expect(err).To(HaveOccurred())
 	g.Expect(err.Error()).To(ContainSubstring("escapes destination directory"))

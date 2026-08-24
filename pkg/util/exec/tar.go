@@ -44,7 +44,11 @@ func CopyFromPod(ctx context.Context, executor Executor, opts CopyOptions) error
 	}()
 
 	extractErr := extractTar(reader, opts.LocalPath)
-	// Close the read end so the producer goroutine unblocks if it is still writing.
+	if extractErr == nil {
+		// Drain remaining bytes so SPDY executor goroutines finish cleanly
+		// before we close the pipe.
+		_, _ = io.Copy(io.Discard, reader)
+	}
 	_ = reader.CloseWithError(extractErr)
 
 	execErr := <-errCh

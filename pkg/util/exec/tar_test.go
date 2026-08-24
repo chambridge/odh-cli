@@ -126,7 +126,7 @@ func TestCopyFromPod_DrainsPipeBeforeClose(t *testing.T) {
 
 	destDir := t.TempDir()
 
-	var pipeWriteErr atomic.Value
+	var pipeWriteErr error
 
 	executor := &MockExecutor{
 		ExecFn: func(_ context.Context, opts ExecOptions) error {
@@ -136,8 +136,7 @@ func TestCopyFromPod_DrainsPipeBeforeClose(t *testing.T) {
 			time.Sleep(10 * time.Millisecond)
 
 			trailing := bytes.Repeat([]byte{0}, 512)
-			_, err := opts.Stdout.Write(trailing)
-			pipeWriteErr.Store(err)
+			_, pipeWriteErr = opts.Stdout.Write(trailing)
 
 			return nil
 		},
@@ -152,11 +151,37 @@ func TestCopyFromPod_DrainsPipeBeforeClose(t *testing.T) {
 	})
 
 	g.Expect(err).ToNot(HaveOccurred())
+	g.Expect(pipeWriteErr).ToNot(HaveOccurred())
+}
 
-	storedErr, ok := pipeWriteErr.Load().(error)
-	if ok && storedErr != nil {
-		t.Errorf("trailing write after tar close should not fail, got: %v", storedErr)
+func TestCopyFromPod_ExcessTrailingData(t *testing.T) {
+	g := NewWithT(t)
+
+	destDir := t.TempDir()
+
+	executor := &MockExecutor{
+		ExecFn: func(_ context.Context, opts ExecOptions) error {
+			tw := tar.NewWriter(opts.Stdout)
+			_ = tw.Close()
+
+			// Write more trailing data than maxTrailingTarBytes to trigger the limit.
+			trailing := bytes.Repeat([]byte{0}, int(maxTrailingTarBytes)+1)
+			_, _ = opts.Stdout.Write(trailing)
+
+			return nil
+		},
 	}
+
+	err := CopyFromPod(t.Context(), executor, CopyOptions{
+		Namespace:     "ns",
+		PodName:       "pod",
+		ContainerName: "ctr",
+		PodPath:       "/data",
+		LocalPath:     destDir,
+	})
+
+	g.Expect(err).To(HaveOccurred())
+	g.Expect(err.Error()).To(ContainSubstring("trailing data after tar archive"))
 }
 
 func TestCopyToPod(t *testing.T) {

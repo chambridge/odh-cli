@@ -13,6 +13,11 @@ import (
 const (
 	tarDirPermission  = 0o755
 	tarFilePermission = 0o644
+
+	// maxTrailingTarBytes is the maximum number of trailing bytes we drain from
+	// the pipe after tar extraction finishes. This prevents a compromised or
+	// misbehaving pod from sending unbounded data after the tar end marker.
+	maxTrailingTarBytes int64 = 1 << 20 // 1 MiB
 )
 
 // CopyOptions configures a file copy between a local path and a pod.
@@ -46,8 +51,12 @@ func CopyFromPod(ctx context.Context, executor Executor, opts CopyOptions) error
 	extractErr := extractTar(reader, opts.LocalPath)
 	if extractErr == nil {
 		// Drain remaining bytes so SPDY executor goroutines finish cleanly
-		// before we close the pipe.
-		_, _ = io.Copy(io.Discard, reader)
+		// before we close the pipe. Use a bounded reader to guard against a
+		// compromised pod streaming data indefinitely after the tar end marker.
+		n, _ := io.Copy(io.Discard, io.LimitReader(reader, maxTrailingTarBytes+1))
+		if n > maxTrailingTarBytes {
+			extractErr = fmt.Errorf("trailing data after tar archive exceeds %d bytes", maxTrailingTarBytes)
+		}
 	}
 	_ = reader.CloseWithError(extractErr)
 

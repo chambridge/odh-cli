@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -28,16 +27,13 @@ func TestCopyFromPod_EmptyTar(t *testing.T) {
 
 	destDir := t.TempDir()
 
-	var writerClosed atomic.Bool
 	executor := &exec.MockExecutor{
 		ExecFn: func(_ context.Context, opts exec.ExecOptions) error {
 			tw := tar.NewWriter(opts.Stdout)
 			_ = tw.Close()
 
-			_, err := opts.Stdout.Write([]byte{0, 0, 0, 0})
-			if err != nil {
-				writerClosed.Store(true)
-			}
+			// Write trailing bytes that the drain logic should absorb.
+			_, _ = opts.Stdout.Write([]byte{0, 0, 0, 0})
 
 			return nil
 		},
@@ -128,17 +124,22 @@ func TestCopyFromPod_DrainsPipeBeforeClose(t *testing.T) {
 
 	destDir := t.TempDir()
 
-	var pipeWriteErr error
+	pipeWriteErrCh := make(chan error, 1)
 
 	executor := &exec.MockExecutor{
 		ExecFn: func(_ context.Context, opts exec.ExecOptions) error {
 			tw := tar.NewWriter(opts.Stdout)
 			_ = tw.Close()
 
+			// Allow CopyFromPod to finish tar extraction and start the drain
+			// loop. The io.Pipe guarantees ordering: this Write blocks until the
+			// reader is actively draining, so the sleep only needs to cover the
+			// scheduling gap between extraction and drain start.
 			time.Sleep(10 * time.Millisecond)
 
 			trailing := bytes.Repeat([]byte{0}, 512)
-			_, pipeWriteErr = opts.Stdout.Write(trailing)
+			_, err := opts.Stdout.Write(trailing)
+			pipeWriteErrCh <- err
 
 			return nil
 		},
@@ -153,7 +154,7 @@ func TestCopyFromPod_DrainsPipeBeforeClose(t *testing.T) {
 	})
 
 	g.Expect(err).ToNot(HaveOccurred())
-	g.Expect(pipeWriteErr).ToNot(HaveOccurred())
+	g.Expect(<-pipeWriteErrCh).ToNot(HaveOccurred())
 }
 
 func TestCopyFromPod_ExcessTrailingData(t *testing.T) {

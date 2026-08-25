@@ -5,7 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,8 +20,8 @@ const (
 	// misbehaving pod from sending unbounded data after the tar end marker.
 	maxTrailingTarBytes int64 = 1 << 20 // 1 MiB
 
-	msgSkippingSymlink        = "skipping symlink during tar creation: %s"
-	msgSkippingTarEntryType   = "skipping unsupported tar entry type %d for %q"
+	msgSkippingSymlink      = "skipping symlink during tar creation"
+	msgSkippingTarEntryType = "skipping unsupported tar entry type"
 )
 
 // CopyOptions configures a file copy between a local path and a pod.
@@ -156,7 +156,7 @@ func extractTar(r io.Reader, destDir string) error {
 				return fmt.Errorf("closing file %s: %w", target, err)
 			}
 		default:
-			log.Printf(msgSkippingTarEntryType, header.Typeflag, header.Name)
+			slog.Info(msgSkippingTarEntryType, "type", header.Typeflag, "name", header.Name)
 		}
 	}
 }
@@ -187,7 +187,7 @@ func createTar(w io.Writer, srcDir string) error {
 		// their targets may not exist on the receiving end. Skip them and
 		// log so operators can investigate if needed.
 		if info.Mode()&os.ModeSymlink != 0 {
-			log.Printf(msgSkippingSymlink, path)
+			slog.Info(msgSkippingSymlink, "path", path)
 
 			return nil
 		}

@@ -30,7 +30,7 @@ const (
 	msgModelMeshNoISVCs    = "No ModelMesh InferenceServices found"
 
 	msgPVCDetected          = "InferenceService %s/%s uses PVC storage (key: %s)"
-	msgPVCClassifyFailed    = "Failed to detect storage type for InferenceService %s/%s: %v (treating as standard)"
+	msgPVCClassifyFailed    = "Failed to detect storage type for InferenceService %s/%s: %v (skipped — resolve and retry)"
 	msgPVCRuntimeUpdate     = "Updated ServingRuntime %s/%s with OVMS single-model args, port 8888, readiness probe"
 	msgPVCRuntimeDryRun     = "Would update ServingRuntime %s/%s with OVMS single-model args, port 8888, readiness probe"
 	msgPVCRuntimeFailed     = "Failed to update ServingRuntime %s/%s for PVC single-model: %v"
@@ -108,13 +108,18 @@ func (a *ModelMeshToRawAction) convertISVCs(
 	)
 
 	standardISVCs, pvcISVCs := a.classifyISVCsByStorageType(ctx, target, isvcs, detectionStep)
+	skippedCount := len(isvcs) - len(standardISVCs) - len(pvcISVCs)
 
-	detectionStep.Completef(result.StepCompleted, "Detected %d standard and %d PVC-backed InferenceService(s)", len(standardISVCs), len(pvcISVCs))
+	if skippedCount > 0 {
+		detectionStep.Completef(result.StepFailed, "Detected %d standard, %d PVC-backed, %d skipped (detection failed) InferenceService(s)", len(standardISVCs), len(pvcISVCs), skippedCount)
+	} else {
+		detectionStep.Completef(result.StepCompleted, "Detected %d standard and %d PVC-backed InferenceService(s)", len(standardISVCs), len(pvcISVCs))
+	}
 
 	// Confirm with user
 	if !target.SkipConfirm && !target.DryRun {
 		target.IO.Fprintln()
-		target.IO.Errorf(msgModelMeshConfirm, len(isvcs))
+		target.IO.Errorf(msgModelMeshConfirm, len(standardISVCs)+len(pvcISVCs))
 
 		if len(pvcISVCs) > 0 {
 			target.IO.Errorf("  (%d standard, %d PVC-backed requiring storageUri rewrite)", len(standardISVCs), len(pvcISVCs))
@@ -317,8 +322,6 @@ func (a *ModelMeshToRawAction) classifyISVCsByStorageType(
 				result.StepFailed,
 				isvc.GetNamespace(), isvc.GetName(), err,
 			)
-
-			standard = append(standard, isvc)
 
 			continue
 		}

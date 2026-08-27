@@ -3,6 +3,7 @@ package modelserving_test
 import (
 	"encoding/base64"
 	"encoding/json"
+	"strings"
 
 	"github.com/blang/semver/v4"
 
@@ -12,6 +13,7 @@ import (
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 
 	"github.com/opendatahub-io/odh-cli/pkg/migrate/action"
+	"github.com/opendatahub-io/odh-cli/pkg/migrate/action/result"
 	"github.com/opendatahub-io/odh-cli/pkg/resources"
 	"github.com/opendatahub-io/odh-cli/pkg/util/client"
 )
@@ -175,6 +177,22 @@ func newModelServingDynamicClient(objects ...runtime.Object) *dynamicfake.FakeDy
 	return dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
 		runtime.NewScheme(), listKinds, objects...,
 	)
+}
+
+// hasStepMessageContaining walks the step tree recursively and returns true
+// if any step with the given status has a message containing substr.
+func hasStepMessageContaining(steps []result.ActionStep, status result.StepStatus, substr string) bool {
+	for _, s := range steps {
+		if s.Status == status && strings.Contains(s.Message, substr) {
+			return true
+		}
+
+		if hasStepMessageContaining(s.Children, status, substr) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // newModelMeshISVCWithStorage creates a ModelMesh ISVC with a storage key reference.

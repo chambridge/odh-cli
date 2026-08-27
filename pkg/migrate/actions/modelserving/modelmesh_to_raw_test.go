@@ -557,6 +557,16 @@ func TestModelMeshToRawAction_PVCConversion(t *testing.T) {
 		// Verify storage key still present (not mutated in dry-run)
 		_, storageKeyFound, _ := unstructured.NestedString(original.Object, "spec", "predictor", "model", "storage", "key")
 		g.Expect(storageKeyFound).To(BeTrue())
+
+		// Verify PVC-specific dry-run step was recorded
+		g.Expect(hasStepMessageContaining(
+			actionResult.Status.Steps, result.StepSkipped, "Would set storageUri=",
+		)).To(BeTrue())
+
+		// Verify detection step recorded PVC-backed count
+		g.Expect(hasStepMessageContaining(
+			actionResult.Status.Steps, result.StepCompleted, "PVC-backed",
+		)).To(BeTrue())
 	})
 
 	t.Run("should handle missing storage-config secret gracefully", func(t *testing.T) {
@@ -618,6 +628,54 @@ func TestModelMeshToRawAction_PVCConversion(t *testing.T) {
 
 		annotations := updated.GetAnnotations()
 		g.Expect(annotations).To(HaveKeyWithValue("serving.kserve.io/deploymentMode", "RawDeployment"))
+	})
+
+	t.Run("should skip ISVC when storage-config entry is malformed", func(t *testing.T) {
+		g := NewWithT(t)
+		ctx := t.Context()
+
+		isvc := newModelMeshISVCWithStorage(testISVCNamespace, "bad-json-model", "ovms-runtime", "corrupt-key", "path")
+		sr := newServingRuntime(testISVCNamespace, "ovms-runtime", true)
+		ns := newNamespace(testISVCNamespace, nil)
+
+		// Create secret with invalid base64 data for the storage key
+		secret := &unstructured.Unstructured{
+			Object: map[string]any{
+				"apiVersion": resources.Secret.APIVersion(),
+				"kind":       resources.Secret.Kind,
+				"metadata": map[string]any{
+					"name":      "storage-config",
+					"namespace": testISVCNamespace,
+				},
+				"data": map[string]any{
+					"corrupt-key": "not-valid-base64!!!",
+				},
+			},
+		}
+
+		dynamicClient := newModelServingDynamicClient(isvc, sr, ns, secret)
+
+		target := newTestTarget(dynamicClient, "2.25.0", false)
+
+		a := &modelserving.ModelMeshToRawAction{}
+		actionResult, err := a.Run().Execute(ctx, target)
+
+		g.Expect(err).ToNot(HaveOccurred())
+
+		// ISVC should NOT be converted — detection failure means skip, not convert
+		updated, err := dynamicClient.Resource(resources.InferenceService.GVR()).
+			Namespace(testISVCNamespace).
+			Get(ctx, "bad-json-model", metav1.GetOptions{})
+
+		g.Expect(err).ToNot(HaveOccurred())
+
+		annotations := updated.GetAnnotations()
+		g.Expect(annotations).To(HaveKeyWithValue("serving.kserve.io/deploymentMode", "ModelMesh"))
+
+		// Detection step should report failure
+		g.Expect(hasStepMessageContaining(
+			actionResult.Status.Steps, result.StepFailed, "Failed to detect storage type",
+		)).To(BeTrue())
 	})
 
 	t.Run("should set deploymentMode in single update with storageUri", func(t *testing.T) {

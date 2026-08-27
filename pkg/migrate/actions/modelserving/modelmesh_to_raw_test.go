@@ -404,3 +404,503 @@ func TestModelMeshToRawAction_RunExecute(t *testing.T) {
 		g.Expect(firstContainer).To(HaveKeyWithValue("name", "ovms"))
 	})
 }
+
+func TestModelMeshToRawAction_PVCConversion(t *testing.T) {
+	t.Run("should convert PVC-backed ISVCs with storageUri rewrite", func(t *testing.T) {
+		g := NewWithT(t)
+		ctx := t.Context()
+
+		isvc := newModelMeshISVCWithStorage(testISVCNamespace, "pvc-model", "ovms-runtime", "my-pvc-key", "models/my-model")
+		sr := newServingRuntime(testISVCNamespace, "ovms-runtime", true)
+		ns := newNamespace(testISVCNamespace, map[string]string{"modelmesh-enabled": "true"})
+		secret := newStorageConfigSecret(testISVCNamespace, map[string]storageConfigEntryJSON{
+			"my-pvc-key": {Type: "pvc", Bucket: "my-pvc-volume", LocalPath: "/models/my-model"},
+		})
+
+		scheme := runtime.NewScheme()
+
+		listKinds := map[schema.GroupVersionResource]string{
+			resources.InferenceService.GVR(): resources.InferenceService.ListKind(),
+			resources.ServingRuntime.GVR():   resources.ServingRuntime.ListKind(),
+			resources.ServiceAccount.GVR():   resources.ServiceAccount.ListKind(),
+			resources.Role.GVR():             resources.Role.ListKind(),
+			resources.RoleBinding.GVR():      resources.RoleBinding.ListKind(),
+			resources.Namespace.GVR():        resources.Namespace.ListKind(),
+			resources.Secret.GVR():           resources.Secret.ListKind(),
+		}
+
+		dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+			scheme, listKinds, isvc, sr, ns, secret,
+		)
+
+		target := newTestTarget(dynamicClient, "2.25.0", false)
+
+		a := &modelserving.ModelMeshToRawAction{}
+		actionResult, err := a.Run().Execute(ctx, target)
+
+		g.Expect(err).ToNot(HaveOccurred())
+		g.Expect(actionResult).ToNot(BeNil())
+
+		// Verify ISVC was patched to RawDeployment with storageUri
+		updated, err := dynamicClient.Resource(resources.InferenceService.GVR()).
+			Namespace(testISVCNamespace).
+			Get(ctx, "pvc-model", metav1.GetOptions{})
+
+		g.Expect(err).ToNot(HaveOccurred())
+
+		annotations := updated.GetAnnotations()
+		g.Expect(annotations).To(HaveKeyWithValue("serving.kserve.io/deploymentMode", "RawDeployment"))
+
+		// Verify storageUri was set
+		storageURI, found, err := unstructured.NestedString(updated.Object, "spec", "predictor", "model", "storageUri")
+		g.Expect(err).ToNot(HaveOccurred())
+		g.Expect(found).To(BeTrue())
+		g.Expect(storageURI).To(Equal("pvc://my-pvc-volume/models/my-model"))
+
+		// Verify storage key was removed
+		_, storageKeyFound, _ := unstructured.NestedString(updated.Object, "spec", "predictor", "model", "storage", "key")
+		g.Expect(storageKeyFound).To(BeFalse())
+	})
+
+	t.Run("should patch OVMS args and port for PVC-backed ISVCs", func(t *testing.T) {
+		g := NewWithT(t)
+		ctx := t.Context()
+
+		isvc := newModelMeshISVCWithStorage(testISVCNamespace, "pvc-model", "ovms-runtime", "pvc-key", "model-dir")
+		sr := newServingRuntime(testISVCNamespace, "ovms-runtime", true)
+		ns := newNamespace(testISVCNamespace, nil)
+		secret := newStorageConfigSecret(testISVCNamespace, map[string]storageConfigEntryJSON{
+			"pvc-key": {Type: "pvc", Bucket: "data-pvc", LocalPath: "/model-dir"},
+		})
+
+		scheme := runtime.NewScheme()
+
+		listKinds := map[schema.GroupVersionResource]string{
+			resources.InferenceService.GVR(): resources.InferenceService.ListKind(),
+			resources.ServingRuntime.GVR():   resources.ServingRuntime.ListKind(),
+			resources.ServiceAccount.GVR():   resources.ServiceAccount.ListKind(),
+			resources.Role.GVR():             resources.Role.ListKind(),
+			resources.RoleBinding.GVR():      resources.RoleBinding.ListKind(),
+			resources.Namespace.GVR():        resources.Namespace.ListKind(),
+			resources.Secret.GVR():           resources.Secret.ListKind(),
+		}
+
+		dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+			scheme, listKinds, isvc, sr, ns, secret,
+		)
+
+		target := newTestTarget(dynamicClient, "2.25.0", false)
+
+		a := &modelserving.ModelMeshToRawAction{}
+		_, err := a.Run().Execute(ctx, target)
+
+		g.Expect(err).ToNot(HaveOccurred())
+
+		// Verify ServingRuntime was updated
+		updatedSR, err := dynamicClient.Resource(resources.ServingRuntime.GVR()).
+			Namespace(testISVCNamespace).
+			Get(ctx, "ovms-runtime", metav1.GetOptions{})
+
+		g.Expect(err).ToNot(HaveOccurred())
+
+		// Verify multiModel=false
+		multiModel, _, _ := unstructured.NestedBool(updatedSR.Object, "spec", "multiModel")
+		g.Expect(multiModel).To(BeFalse())
+
+		// Verify container name
+		containers, _, _ := unstructured.NestedSlice(updatedSR.Object, "spec", "containers")
+		g.Expect(containers).To(HaveLen(1))
+
+		container := containers[0].(map[string]any)
+		g.Expect(container).To(HaveKeyWithValue("name", "kserve-container"))
+
+		// Verify OVMS single-model args
+		args, ok := container["args"].([]any)
+		g.Expect(ok).To(BeTrue())
+		g.Expect(args).To(ContainElement("--model_name=pvc-model"))
+		g.Expect(args).To(ContainElement("--model_path=/mnt/models"))
+		g.Expect(args).To(ContainElement("--port=8001"))
+		g.Expect(args).To(ContainElement("--rest_port=8888"))
+
+		// Verify port 8888
+		ports, ok := container["ports"].([]any)
+		g.Expect(ok).To(BeTrue())
+		g.Expect(ports).To(HaveLen(1))
+
+		port := ports[0].(map[string]any)
+		g.Expect(port).To(HaveKeyWithValue("containerPort", int64(8888)))
+		g.Expect(port).To(HaveKeyWithValue("protocol", "TCP"))
+
+		// Verify readiness probe
+		probe, ok := container["readinessProbe"].(map[string]any)
+		g.Expect(ok).To(BeTrue())
+
+		tcpSocket, ok := probe["tcpSocket"].(map[string]any)
+		g.Expect(ok).To(BeTrue())
+		g.Expect(tcpSocket).To(HaveKeyWithValue("port", int64(8888)))
+	})
+
+	t.Run("should convert S3-backed ISVCs with storage key normally", func(t *testing.T) {
+		g := NewWithT(t)
+		ctx := t.Context()
+
+		isvc := newModelMeshISVCWithStorage(testISVCNamespace, "s3-model", "ovms-runtime", "s3-key", "model-path")
+		sr := newServingRuntime(testISVCNamespace, "ovms-runtime", true)
+		ns := newNamespace(testISVCNamespace, nil)
+		secret := newStorageConfigSecret(testISVCNamespace, map[string]storageConfigEntryJSON{
+			"s3-key": {Type: "s3", Bucket: "my-bucket"},
+		})
+
+		scheme := runtime.NewScheme()
+
+		listKinds := map[schema.GroupVersionResource]string{
+			resources.InferenceService.GVR(): resources.InferenceService.ListKind(),
+			resources.ServingRuntime.GVR():   resources.ServingRuntime.ListKind(),
+			resources.ServiceAccount.GVR():   resources.ServiceAccount.ListKind(),
+			resources.Role.GVR():             resources.Role.ListKind(),
+			resources.RoleBinding.GVR():      resources.RoleBinding.ListKind(),
+			resources.Namespace.GVR():        resources.Namespace.ListKind(),
+			resources.Secret.GVR():           resources.Secret.ListKind(),
+		}
+
+		dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+			scheme, listKinds, isvc, sr, ns, secret,
+		)
+
+		target := newTestTarget(dynamicClient, "2.25.0", false)
+
+		a := &modelserving.ModelMeshToRawAction{}
+		_, err := a.Run().Execute(ctx, target)
+
+		g.Expect(err).ToNot(HaveOccurred())
+
+		// Verify ISVC was patched to RawDeployment (standard path, no storageUri rewrite)
+		updated, err := dynamicClient.Resource(resources.InferenceService.GVR()).
+			Namespace(testISVCNamespace).
+			Get(ctx, "s3-model", metav1.GetOptions{})
+
+		g.Expect(err).ToNot(HaveOccurred())
+
+		annotations := updated.GetAnnotations()
+		g.Expect(annotations).To(HaveKeyWithValue("serving.kserve.io/deploymentMode", "RawDeployment"))
+
+		// Verify storageUri was NOT set (S3 uses existing storage path)
+		_, storageURIFound, _ := unstructured.NestedString(updated.Object, "spec", "predictor", "model", "storageUri")
+		g.Expect(storageURIFound).To(BeFalse())
+
+		// Verify storage key is still present
+		_, storageKeyFound, _ := unstructured.NestedString(updated.Object, "spec", "predictor", "model", "storage", "key")
+		g.Expect(storageKeyFound).To(BeTrue())
+	})
+
+	t.Run("should handle mixed S3 and PVC ISVCs", func(t *testing.T) {
+		g := NewWithT(t)
+		ctx := t.Context()
+
+		s3ISVC := newModelMeshISVCWithStorage(testISVCNamespace, "s3-model", "ovms-runtime", "s3-key", "s3-path")
+		pvcISVC := newModelMeshISVCWithStorage(testISVCNamespace, "pvc-model", "ovms-runtime", "pvc-key", "pvc-path")
+		sr := newServingRuntime(testISVCNamespace, "ovms-runtime", true)
+		ns := newNamespace(testISVCNamespace, nil)
+		secret := newStorageConfigSecret(testISVCNamespace, map[string]storageConfigEntryJSON{
+			"s3-key":  {Type: "s3", Bucket: "s3-bucket"},
+			"pvc-key": {Type: "pvc", Bucket: "pvc-volume", LocalPath: "/pvc-path"},
+		})
+
+		scheme := runtime.NewScheme()
+
+		listKinds := map[schema.GroupVersionResource]string{
+			resources.InferenceService.GVR(): resources.InferenceService.ListKind(),
+			resources.ServingRuntime.GVR():   resources.ServingRuntime.ListKind(),
+			resources.ServiceAccount.GVR():   resources.ServiceAccount.ListKind(),
+			resources.Role.GVR():             resources.Role.ListKind(),
+			resources.RoleBinding.GVR():      resources.RoleBinding.ListKind(),
+			resources.Namespace.GVR():        resources.Namespace.ListKind(),
+			resources.Secret.GVR():           resources.Secret.ListKind(),
+		}
+
+		dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+			scheme, listKinds, s3ISVC, pvcISVC, sr, ns, secret,
+		)
+
+		target := newTestTarget(dynamicClient, "2.25.0", false)
+
+		a := &modelserving.ModelMeshToRawAction{}
+		_, err := a.Run().Execute(ctx, target)
+
+		g.Expect(err).ToNot(HaveOccurred())
+
+		// Both should be RawDeployment
+		for _, name := range []string{"s3-model", "pvc-model"} {
+			updated, getErr := dynamicClient.Resource(resources.InferenceService.GVR()).
+				Namespace(testISVCNamespace).
+				Get(ctx, name, metav1.GetOptions{})
+
+			g.Expect(getErr).ToNot(HaveOccurred())
+
+			annotations := updated.GetAnnotations()
+			g.Expect(annotations).To(HaveKeyWithValue("serving.kserve.io/deploymentMode", "RawDeployment"))
+		}
+
+		// PVC ISVC should have storageUri
+		pvcUpdated, err := dynamicClient.Resource(resources.InferenceService.GVR()).
+			Namespace(testISVCNamespace).
+			Get(ctx, "pvc-model", metav1.GetOptions{})
+
+		g.Expect(err).ToNot(HaveOccurred())
+
+		storageURI, found, _ := unstructured.NestedString(pvcUpdated.Object, "spec", "predictor", "model", "storageUri")
+		g.Expect(found).To(BeTrue())
+		g.Expect(storageURI).To(Equal("pvc://pvc-volume/pvc-path"))
+
+		// S3 ISVC should NOT have storageUri
+		s3Updated, err := dynamicClient.Resource(resources.InferenceService.GVR()).
+			Namespace(testISVCNamespace).
+			Get(ctx, "s3-model", metav1.GetOptions{})
+
+		g.Expect(err).ToNot(HaveOccurred())
+
+		_, s3URIFound, _ := unstructured.NestedString(s3Updated.Object, "spec", "predictor", "model", "storageUri")
+		g.Expect(s3URIFound).To(BeFalse())
+	})
+
+	t.Run("should surface PVC detection in dry-run mode", func(t *testing.T) {
+		g := NewWithT(t)
+		ctx := t.Context()
+
+		isvc := newModelMeshISVCWithStorage(testISVCNamespace, "pvc-model", "ovms-runtime", "pvc-key", "model-dir")
+		sr := newServingRuntime(testISVCNamespace, "ovms-runtime", true)
+		ns := newNamespace(testISVCNamespace, map[string]string{"modelmesh-enabled": "true"})
+		secret := newStorageConfigSecret(testISVCNamespace, map[string]storageConfigEntryJSON{
+			"pvc-key": {Type: "pvc", Bucket: "my-pvc", LocalPath: "/model-dir"},
+		})
+
+		scheme := runtime.NewScheme()
+
+		listKinds := map[schema.GroupVersionResource]string{
+			resources.InferenceService.GVR(): resources.InferenceService.ListKind(),
+			resources.ServingRuntime.GVR():   resources.ServingRuntime.ListKind(),
+			resources.ServiceAccount.GVR():   resources.ServiceAccount.ListKind(),
+			resources.Role.GVR():             resources.Role.ListKind(),
+			resources.RoleBinding.GVR():      resources.RoleBinding.ListKind(),
+			resources.Namespace.GVR():        resources.Namespace.ListKind(),
+			resources.Secret.GVR():           resources.Secret.ListKind(),
+		}
+
+		dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+			scheme, listKinds, isvc, sr, ns, secret,
+		)
+
+		target := newTestTarget(dynamicClient, "2.25.0", true)
+
+		a := &modelserving.ModelMeshToRawAction{}
+		actionResult, err := a.Run().Execute(ctx, target)
+
+		g.Expect(err).ToNot(HaveOccurred())
+		g.Expect(actionResult).ToNot(BeNil())
+
+		// Verify ISVC was NOT mutated
+		original, err := dynamicClient.Resource(resources.InferenceService.GVR()).
+			Namespace(testISVCNamespace).
+			Get(ctx, "pvc-model", metav1.GetOptions{})
+
+		g.Expect(err).ToNot(HaveOccurred())
+
+		annotations := original.GetAnnotations()
+		g.Expect(annotations).To(HaveKeyWithValue("serving.kserve.io/deploymentMode", "ModelMesh"))
+
+		// Verify storage key still present (not mutated in dry-run)
+		_, storageKeyFound, _ := unstructured.NestedString(original.Object, "spec", "predictor", "model", "storage", "key")
+		g.Expect(storageKeyFound).To(BeTrue())
+	})
+
+	t.Run("should handle missing storage-config secret gracefully", func(t *testing.T) {
+		g := NewWithT(t)
+		ctx := t.Context()
+
+		// ISVC has storage key but no storage-config secret exists
+		isvc := newModelMeshISVCWithStorage(testISVCNamespace, "no-secret-model", "ovms-runtime", "missing-key", "path")
+		sr := newServingRuntime(testISVCNamespace, "ovms-runtime", true)
+		ns := newNamespace(testISVCNamespace, nil)
+
+		scheme := runtime.NewScheme()
+
+		listKinds := map[schema.GroupVersionResource]string{
+			resources.InferenceService.GVR(): resources.InferenceService.ListKind(),
+			resources.ServingRuntime.GVR():   resources.ServingRuntime.ListKind(),
+			resources.ServiceAccount.GVR():   resources.ServiceAccount.ListKind(),
+			resources.Role.GVR():             resources.Role.ListKind(),
+			resources.RoleBinding.GVR():      resources.RoleBinding.ListKind(),
+			resources.Namespace.GVR():        resources.Namespace.ListKind(),
+			resources.Secret.GVR():           resources.Secret.ListKind(),
+		}
+
+		dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+			scheme, listKinds, isvc, sr, ns,
+		)
+
+		target := newTestTarget(dynamicClient, "2.25.0", false)
+
+		a := &modelserving.ModelMeshToRawAction{}
+		_, err := a.Run().Execute(ctx, target)
+
+		g.Expect(err).ToNot(HaveOccurred())
+
+		// Should be treated as standard and converted normally
+		updated, err := dynamicClient.Resource(resources.InferenceService.GVR()).
+			Namespace(testISVCNamespace).
+			Get(ctx, "no-secret-model", metav1.GetOptions{})
+
+		g.Expect(err).ToNot(HaveOccurred())
+
+		annotations := updated.GetAnnotations()
+		g.Expect(annotations).To(HaveKeyWithValue("serving.kserve.io/deploymentMode", "RawDeployment"))
+	})
+
+	t.Run("should handle missing storage key in secret", func(t *testing.T) {
+		g := NewWithT(t)
+		ctx := t.Context()
+
+		// ISVC references a key not in the storage-config secret
+		isvc := newModelMeshISVCWithStorage(testISVCNamespace, "orphan-key-model", "ovms-runtime", "nonexistent-key", "path")
+		sr := newServingRuntime(testISVCNamespace, "ovms-runtime", true)
+		ns := newNamespace(testISVCNamespace, nil)
+		secret := newStorageConfigSecret(testISVCNamespace, map[string]storageConfigEntryJSON{
+			"other-key": {Type: "s3", Bucket: "some-bucket"},
+		})
+
+		scheme := runtime.NewScheme()
+
+		listKinds := map[schema.GroupVersionResource]string{
+			resources.InferenceService.GVR(): resources.InferenceService.ListKind(),
+			resources.ServingRuntime.GVR():   resources.ServingRuntime.ListKind(),
+			resources.ServiceAccount.GVR():   resources.ServiceAccount.ListKind(),
+			resources.Role.GVR():             resources.Role.ListKind(),
+			resources.RoleBinding.GVR():      resources.RoleBinding.ListKind(),
+			resources.Namespace.GVR():        resources.Namespace.ListKind(),
+			resources.Secret.GVR():           resources.Secret.ListKind(),
+		}
+
+		dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+			scheme, listKinds, isvc, sr, ns, secret,
+		)
+
+		target := newTestTarget(dynamicClient, "2.25.0", false)
+
+		a := &modelserving.ModelMeshToRawAction{}
+		_, err := a.Run().Execute(ctx, target)
+
+		g.Expect(err).ToNot(HaveOccurred())
+
+		// Should be treated as standard and converted normally
+		updated, err := dynamicClient.Resource(resources.InferenceService.GVR()).
+			Namespace(testISVCNamespace).
+			Get(ctx, "orphan-key-model", metav1.GetOptions{})
+
+		g.Expect(err).ToNot(HaveOccurred())
+
+		annotations := updated.GetAnnotations()
+		g.Expect(annotations).To(HaveKeyWithValue("serving.kserve.io/deploymentMode", "RawDeployment"))
+	})
+
+	t.Run("should set deploymentMode in single update with storageUri", func(t *testing.T) {
+		g := NewWithT(t)
+		ctx := t.Context()
+
+		isvc := newModelMeshISVCWithStorage(testISVCNamespace, "pvc-single-update", "ovms-runtime", "pvc-key", "path")
+		sr := newServingRuntime(testISVCNamespace, "ovms-runtime", true)
+		ns := newNamespace(testISVCNamespace, nil)
+		secret := newStorageConfigSecret(testISVCNamespace, map[string]storageConfigEntryJSON{
+			"pvc-key": {Type: "pvc", Bucket: "vol", LocalPath: "/path"},
+		})
+
+		scheme := runtime.NewScheme()
+
+		listKinds := map[schema.GroupVersionResource]string{
+			resources.InferenceService.GVR(): resources.InferenceService.ListKind(),
+			resources.ServingRuntime.GVR():   resources.ServingRuntime.ListKind(),
+			resources.ServiceAccount.GVR():   resources.ServiceAccount.ListKind(),
+			resources.Role.GVR():             resources.Role.ListKind(),
+			resources.RoleBinding.GVR():      resources.RoleBinding.ListKind(),
+			resources.Namespace.GVR():        resources.Namespace.ListKind(),
+			resources.Secret.GVR():           resources.Secret.ListKind(),
+		}
+
+		dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+			scheme, listKinds, isvc, sr, ns, secret,
+		)
+
+		target := newTestTarget(dynamicClient, "2.25.0", false)
+
+		a := &modelserving.ModelMeshToRawAction{}
+		_, err := a.Run().Execute(ctx, target)
+
+		g.Expect(err).ToNot(HaveOccurred())
+
+		updated, err := dynamicClient.Resource(resources.InferenceService.GVR()).
+			Namespace(testISVCNamespace).
+			Get(ctx, "pvc-single-update", metav1.GetOptions{})
+
+		g.Expect(err).ToNot(HaveOccurred())
+
+		// Both storageUri and deploymentMode should be set
+		storageURI, found, _ := unstructured.NestedString(updated.Object, "spec", "predictor", "model", "storageUri")
+		g.Expect(found).To(BeTrue())
+		g.Expect(storageURI).To(Equal("pvc://vol/path"))
+
+		annotations := updated.GetAnnotations()
+		g.Expect(annotations).To(HaveKeyWithValue("serving.kserve.io/deploymentMode", "RawDeployment"))
+	})
+
+	t.Run("should warn when multiple PVC ISVCs share a ServingRuntime", func(t *testing.T) {
+		g := NewWithT(t)
+		ctx := t.Context()
+
+		isvc1 := newModelMeshISVCWithStorage(testISVCNamespace, "pvc-model-1", "shared-runtime", "pvc-key-1", "path1")
+		isvc2 := newModelMeshISVCWithStorage(testISVCNamespace, "pvc-model-2", "shared-runtime", "pvc-key-2", "path2")
+		sr := newServingRuntime(testISVCNamespace, "shared-runtime", true)
+		ns := newNamespace(testISVCNamespace, nil)
+		secret := newStorageConfigSecret(testISVCNamespace, map[string]storageConfigEntryJSON{
+			"pvc-key-1": {Type: "pvc", Bucket: "vol1", LocalPath: "/path1"},
+			"pvc-key-2": {Type: "pvc", Bucket: "vol2", LocalPath: "/path2"},
+		})
+
+		scheme := runtime.NewScheme()
+
+		listKinds := map[schema.GroupVersionResource]string{
+			resources.InferenceService.GVR(): resources.InferenceService.ListKind(),
+			resources.ServingRuntime.GVR():   resources.ServingRuntime.ListKind(),
+			resources.ServiceAccount.GVR():   resources.ServiceAccount.ListKind(),
+			resources.Role.GVR():             resources.Role.ListKind(),
+			resources.RoleBinding.GVR():      resources.RoleBinding.ListKind(),
+			resources.Namespace.GVR():        resources.Namespace.ListKind(),
+			resources.Secret.GVR():           resources.Secret.ListKind(),
+		}
+
+		dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+			scheme, listKinds, isvc1, isvc2, sr, ns, secret,
+		)
+
+		target := newTestTarget(dynamicClient, "2.25.0", false)
+
+		a := &modelserving.ModelMeshToRawAction{}
+		actionResult, err := a.Run().Execute(ctx, target)
+
+		g.Expect(err).ToNot(HaveOccurred())
+		g.Expect(actionResult).ToNot(BeNil())
+
+		// Both ISVCs should still be converted to RawDeployment
+		for _, name := range []string{"pvc-model-1", "pvc-model-2"} {
+			updated, getErr := dynamicClient.Resource(resources.InferenceService.GVR()).
+				Namespace(testISVCNamespace).
+				Get(ctx, name, metav1.GetOptions{})
+
+			g.Expect(getErr).ToNot(HaveOccurred())
+
+			ann := updated.GetAnnotations()
+			g.Expect(ann).To(HaveKeyWithValue("serving.kserve.io/deploymentMode", "RawDeployment"))
+		}
+
+		// Result should contain a failed step for the shared runtime
+		g.Expect(actionResult.HasFailedSteps()).To(BeTrue())
+	})
+}

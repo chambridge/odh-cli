@@ -1,6 +1,9 @@
 package modelserving_test
 
 import (
+	"encoding/base64"
+	"encoding/json"
+
 	"github.com/blang/semver/v4"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -152,5 +155,68 @@ func newTestTarget(dynamicClient *dynamicfake.FakeDynamicClient, currentVersion 
 		DryRun:         dryRun,
 		SkipConfirm:    true,
 		Recorder:       action.NewRootRecorder(),
+	}
+}
+
+// newModelMeshISVCWithStorage creates a ModelMesh ISVC with a storage key reference.
+func newModelMeshISVCWithStorage(namespace, name, runtimeName, storageKey, storagePath string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": resources.InferenceService.APIVersion(),
+			"kind":       resources.InferenceService.Kind,
+			"metadata": map[string]any{
+				"name":      name,
+				"namespace": namespace,
+				"uid":       "test-uid-mm-storage-123",
+				"annotations": map[string]any{
+					"serving.kserve.io/deploymentMode": "ModelMesh",
+				},
+			},
+			"spec": map[string]any{
+				"predictor": map[string]any{
+					"model": map[string]any{
+						"runtime": runtimeName,
+						"storage": map[string]any{
+							"key":  storageKey,
+							"path": storagePath,
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+// storageConfigEntryJSON is a helper to build storage-config secret entries.
+type storageConfigEntryJSON struct {
+	Type      string `json:"type"`
+	Bucket    string `json:"bucket,omitempty"`
+	LocalPath string `json:"localPath,omitempty"`
+}
+
+// newStorageConfigSecret creates a storage-config secret with the given entries.
+// Each key maps to a storageConfigEntryJSON that gets JSON-marshaled and base64-encoded.
+func newStorageConfigSecret(namespace string, entries map[string]storageConfigEntryJSON) *unstructured.Unstructured {
+	data := make(map[string]any, len(entries))
+
+	for key, entry := range entries {
+		jsonBytes, err := json.Marshal(entry)
+		if err != nil {
+			panic("test helper: failed to marshal storage-config entry: " + err.Error())
+		}
+
+		data[key] = base64.StdEncoding.EncodeToString(jsonBytes)
+	}
+
+	return &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": resources.Secret.APIVersion(),
+			"kind":       resources.Secret.Kind,
+			"metadata": map[string]any{
+				"name":      "storage-config",
+				"namespace": namespace,
+			},
+			"data": data,
+		},
 	}
 }

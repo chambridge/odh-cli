@@ -7,6 +7,8 @@ import (
 	"github.com/blang/semver/v4"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 
 	"github.com/opendatahub-io/odh-cli/pkg/migrate/action"
@@ -156,6 +158,23 @@ func newTestTarget(dynamicClient *dynamicfake.FakeDynamicClient, currentVersion 
 		SkipConfirm:    true,
 		Recorder:       action.NewRootRecorder(),
 	}
+}
+
+// newModelServingDynamicClient builds a fake dynamic client with list kinds used by model-serving actions.
+func newModelServingDynamicClient(objects ...runtime.Object) *dynamicfake.FakeDynamicClient {
+	listKinds := map[schema.GroupVersionResource]string{
+		resources.InferenceService.GVR(): resources.InferenceService.ListKind(),
+		resources.ServingRuntime.GVR():   resources.ServingRuntime.ListKind(),
+		resources.ServiceAccount.GVR():   resources.ServiceAccount.ListKind(),
+		resources.Role.GVR():             resources.Role.ListKind(),
+		resources.RoleBinding.GVR():      resources.RoleBinding.ListKind(),
+		resources.Namespace.GVR():        resources.Namespace.ListKind(),
+		resources.Secret.GVR():           resources.Secret.ListKind(),
+	}
+
+	return dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+		runtime.NewScheme(), listKinds, objects...,
+	)
 }
 
 // newModelMeshISVCWithStorage creates a ModelMesh ISVC with a storage key reference.

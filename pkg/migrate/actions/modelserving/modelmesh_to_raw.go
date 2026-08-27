@@ -34,7 +34,8 @@ const (
 	msgPVCRuntimeUpdate     = "Updated ServingRuntime %s/%s with OVMS single-model args, port 8888, readiness probe"
 	msgPVCRuntimeDryRun     = "Would update ServingRuntime %s/%s with OVMS single-model args, port 8888, readiness probe"
 	msgPVCRuntimeFailed     = "Failed to update ServingRuntime %s/%s for PVC single-model: %v"
-	msgPVCRuntimeShared     = "ServingRuntime %s/%s is shared by multiple PVC ISVCs; --model_name set to last ISVC processed"
+	msgPVCRuntimeShared     = "ServingRuntime %s/%s is already patched for another PVC InferenceService; --model_name keeps the first ISVC processed. Create a dedicated ServingRuntime for %s/%s"
+	msgPVCStorageURIInvalid = "Failed to build storageUri for InferenceService %s/%s: %v"
 	msgPVCStorageURISet     = "Set storageUri=%s and deploymentMode=RawDeployment on InferenceService %s/%s"
 	msgPVCStorageURIDryRun  = "Would set storageUri=%s and deploymentMode=RawDeployment on InferenceService %s/%s"
 	msgPVCStorageURIFailed  = "Failed to update InferenceService %s/%s for PVC conversion: %v"
@@ -100,8 +101,15 @@ func (a *ModelMeshToRawAction) convertISVCs(
 
 	step.Recordf("list-isvcs", msgFoundISVCs, result.StepCompleted, len(isvcs), deploymentModeModelMesh)
 
-	// Classify ISVCs by storage type
-	standardISVCs, pvcISVCs := a.classifyISVCsByStorageType(ctx, target, isvcs, step)
+	// Classify ISVCs by storage type (detection only — no mutations, safe before consent)
+	detectionStep := step.Child(
+		"detect-storage-types",
+		"Detect PVC-backed InferenceServices",
+	)
+
+	standardISVCs, pvcISVCs := a.classifyISVCsByStorageType(ctx, target, isvcs, detectionStep)
+
+	detectionStep.Completef(result.StepCompleted, "Detected %d standard and %d PVC-backed InferenceService(s)", len(standardISVCs), len(pvcISVCs))
 
 	// Confirm with user
 	if !target.SkipConfirm && !target.DryRun {
@@ -340,9 +348,15 @@ func (a *ModelMeshToRawAction) convertPVCISVC(
 	step action.StepRecorder,
 	patchedRuntimes map[string]bool,
 ) bool {
-	storageURI := buildPVCStorageURI(pi.entry)
 	ns := pi.isvc.GetNamespace()
 	name := pi.isvc.GetName()
+
+	storageURI, err := buildPVCStorageURI(pi.entry)
+	if err != nil {
+		step.Recordf("pvc-storageuri-"+name, msgPVCStorageURIInvalid, result.StepFailed, ns, name, err)
+
+		return false
+	}
 
 	if target.DryRun {
 		step.Recordf("pvc-storageuri-"+name, msgPVCStorageURIDryRun, result.StepSkipped, storageURI, ns, name)
@@ -369,7 +383,7 @@ func (a *ModelMeshToRawAction) convertPVCISVC(
 	annotations[annotationDeploymentMode] = deploymentModeRawDeployment
 	pi.isvc.SetAnnotations(annotations)
 
-	_, err := target.Client.Dynamic().Resource(resources.InferenceService.GVR()).
+	_, err = target.Client.Dynamic().Resource(resources.InferenceService.GVR()).
 		Namespace(ns).
 		Update(ctx, pi.isvc, metav1.UpdateOptions{})
 	if err != nil {
@@ -409,7 +423,7 @@ func (a *ModelMeshToRawAction) updateServingRuntimeForPVC(
 	)
 
 	if patchedRuntimes[runtimeKey] {
-		step.Completef(result.StepFailed, msgPVCRuntimeShared, ns, runtimeName)
+		step.Completef(result.StepFailed, msgPVCRuntimeShared, ns, runtimeName, ns, isvcName)
 
 		return
 	}

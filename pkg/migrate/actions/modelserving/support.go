@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path"
 	"strings"
 	"time"
 
@@ -820,12 +821,22 @@ func getISVCStorageKey(isvc *unstructured.Unstructured) string {
 }
 
 // buildPVCStorageURI constructs a KServe-compatible PVC storage URI.
-func buildPVCStorageURI(entry *storageConfigEntry) string {
-	path := strings.TrimPrefix(entry.LocalPath, "/")
-
-	if path == "" {
-		return fmt.Sprintf("pvc://%s/", entry.Bucket)
+// Returns an error when the storage-config entry cannot produce a valid URI.
+func buildPVCStorageURI(entry *storageConfigEntry) (string, error) {
+	if entry.Bucket == "" {
+		return "", errors.New("storage-config entry has empty bucket (PVC name)")
 	}
 
-	return fmt.Sprintf("pvc://%s/%s", entry.Bucket, path)
+	trimmed := strings.TrimPrefix(entry.LocalPath, "/")
+
+	if trimmed == "" {
+		return fmt.Sprintf("pvc://%s/", entry.Bucket), nil
+	}
+
+	cleaned := path.Clean(trimmed)
+	if cleaned == ".." || strings.HasPrefix(cleaned, "../") {
+		return "", fmt.Errorf("storage-config localPath %q escapes the volume root", entry.LocalPath)
+	}
+
+	return fmt.Sprintf("pvc://%s/%s", entry.Bucket, cleaned), nil
 }

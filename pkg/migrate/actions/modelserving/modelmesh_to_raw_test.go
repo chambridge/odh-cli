@@ -7,15 +7,11 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	dynamicfake "k8s.io/client-go/dynamic/fake"
 
 	"github.com/opendatahub-io/odh-cli/pkg/migrate/action"
 	"github.com/opendatahub-io/odh-cli/pkg/migrate/action/result"
 	"github.com/opendatahub-io/odh-cli/pkg/migrate/actions/modelserving"
 	"github.com/opendatahub-io/odh-cli/pkg/resources"
-	"github.com/opendatahub-io/odh-cli/pkg/util/client"
 
 	. "github.com/onsi/gomega"
 )
@@ -135,15 +131,7 @@ func TestModelMeshToRawAction_RunValidate(t *testing.T) {
 
 		isvc := newModelMeshISVC(testISVCNamespace, "mm-model", "ovms")
 
-		scheme := runtime.NewScheme()
-
-		listKinds := map[schema.GroupVersionResource]string{
-			resources.InferenceService.GVR(): resources.InferenceService.ListKind(),
-		}
-
-		dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
-			scheme, listKinds, isvc,
-		)
+		dynamicClient := newModelServingDynamicClient(isvc)
 
 		target := newTestTarget(dynamicClient, "2.25.0", false)
 
@@ -173,36 +161,9 @@ func TestModelMeshToRawAction_RunExecute(t *testing.T) {
 		sr := newServingRuntime(testISVCNamespace, "ovms-runtime", true)
 		ns := newNamespace(testISVCNamespace, map[string]string{"modelmesh-enabled": "true"})
 
-		scheme := runtime.NewScheme()
+		dynamicClient := newModelServingDynamicClient(isvc, sr, ns)
 
-		listKinds := map[schema.GroupVersionResource]string{
-			resources.InferenceService.GVR(): resources.InferenceService.ListKind(),
-			resources.ServingRuntime.GVR():   resources.ServingRuntime.ListKind(),
-			resources.ServiceAccount.GVR():   resources.ServiceAccount.ListKind(),
-			resources.Role.GVR():             resources.Role.ListKind(),
-			resources.RoleBinding.GVR():      resources.RoleBinding.ListKind(),
-			resources.Namespace.GVR():        resources.Namespace.ListKind(),
-		}
-
-		dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
-			scheme, listKinds, isvc, sr, ns,
-		)
-
-		testClient := client.NewForTesting(client.TestClientConfig{
-			Dynamic: dynamicClient,
-		})
-
-		v := semver.MustParse("2.25.0")
-		tv := semver.MustParse("3.0.0")
-
-		target := action.Target{
-			Client:         testClient,
-			CurrentVersion: &v,
-			TargetVersion:  &tv,
-			DryRun:         false,
-			SkipConfirm:    true,
-			Recorder:       action.NewRootRecorder(),
-		}
+		target := newTestTarget(dynamicClient, "2.25.0", false)
 
 		a := &modelserving.ModelMeshToRawAction{}
 		actionResult, err := a.Run().Execute(ctx, target)
@@ -251,20 +212,7 @@ func TestModelMeshToRawAction_RunExecute(t *testing.T) {
 		sr := newServingRuntime(testISVCNamespace, "ovms-runtime", true)
 		ns := newNamespace(testISVCNamespace, nil)
 
-		scheme := runtime.NewScheme()
-
-		listKinds := map[schema.GroupVersionResource]string{
-			resources.InferenceService.GVR(): resources.InferenceService.ListKind(),
-			resources.ServingRuntime.GVR():   resources.ServingRuntime.ListKind(),
-			resources.ServiceAccount.GVR():   resources.ServiceAccount.ListKind(),
-			resources.Role.GVR():             resources.Role.ListKind(),
-			resources.RoleBinding.GVR():      resources.RoleBinding.ListKind(),
-			resources.Namespace.GVR():        resources.Namespace.ListKind(),
-		}
-
-		dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
-			scheme, listKinds, isvc, sr, ns,
-		)
+		dynamicClient := newModelServingDynamicClient(isvc, sr, ns)
 
 		target := newTestTarget(dynamicClient, "2.25.0", false)
 
@@ -289,20 +237,7 @@ func TestModelMeshToRawAction_RunExecute(t *testing.T) {
 		sr := newServingRuntime(testISVCNamespace, "ovms-runtime", true)
 		ns := newNamespace(testISVCNamespace, nil)
 
-		scheme := runtime.NewScheme()
-
-		listKinds := map[schema.GroupVersionResource]string{
-			resources.InferenceService.GVR(): resources.InferenceService.ListKind(),
-			resources.ServingRuntime.GVR():   resources.ServingRuntime.ListKind(),
-			resources.ServiceAccount.GVR():   resources.ServiceAccount.ListKind(),
-			resources.Role.GVR():             resources.Role.ListKind(),
-			resources.RoleBinding.GVR():      resources.RoleBinding.ListKind(),
-			resources.Namespace.GVR():        resources.Namespace.ListKind(),
-		}
-
-		dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
-			scheme, listKinds, isvc, sr, ns,
-		)
+		dynamicClient := newModelServingDynamicClient(isvc, sr, ns)
 
 		target := newTestTarget(dynamicClient, "2.25.0", false)
 
@@ -323,13 +258,7 @@ func TestModelMeshToRawAction_RunExecute(t *testing.T) {
 		g := NewWithT(t)
 		ctx := t.Context()
 
-		scheme := runtime.NewScheme()
-
-		listKinds := map[schema.GroupVersionResource]string{
-			resources.InferenceService.GVR(): resources.InferenceService.ListKind(),
-		}
-
-		dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, listKinds)
+		dynamicClient := newModelServingDynamicClient()
 
 		target := newTestTarget(dynamicClient, "2.25.0", false)
 
@@ -357,20 +286,7 @@ func TestModelMeshToRawAction_RunExecute(t *testing.T) {
 		sr := newServingRuntime(testISVCNamespace, "ovms-runtime", true)
 		ns := newNamespace(testISVCNamespace, map[string]string{"modelmesh-enabled": "true"})
 
-		scheme := runtime.NewScheme()
-
-		listKinds := map[schema.GroupVersionResource]string{
-			resources.InferenceService.GVR(): resources.InferenceService.ListKind(),
-			resources.ServingRuntime.GVR():   resources.ServingRuntime.ListKind(),
-			resources.ServiceAccount.GVR():   resources.ServiceAccount.ListKind(),
-			resources.Role.GVR():             resources.Role.ListKind(),
-			resources.RoleBinding.GVR():      resources.RoleBinding.ListKind(),
-			resources.Namespace.GVR():        resources.Namespace.ListKind(),
-		}
-
-		dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
-			scheme, listKinds, isvc, sr, ns,
-		)
+		dynamicClient := newModelServingDynamicClient(isvc, sr, ns)
 
 		target := newTestTarget(dynamicClient, "2.25.0", true)
 
@@ -417,21 +333,7 @@ func TestModelMeshToRawAction_PVCConversion(t *testing.T) {
 			"my-pvc-key": {Type: "pvc", Bucket: "my-pvc-volume", LocalPath: "/models/my-model"},
 		})
 
-		scheme := runtime.NewScheme()
-
-		listKinds := map[schema.GroupVersionResource]string{
-			resources.InferenceService.GVR(): resources.InferenceService.ListKind(),
-			resources.ServingRuntime.GVR():   resources.ServingRuntime.ListKind(),
-			resources.ServiceAccount.GVR():   resources.ServiceAccount.ListKind(),
-			resources.Role.GVR():             resources.Role.ListKind(),
-			resources.RoleBinding.GVR():      resources.RoleBinding.ListKind(),
-			resources.Namespace.GVR():        resources.Namespace.ListKind(),
-			resources.Secret.GVR():           resources.Secret.ListKind(),
-		}
-
-		dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
-			scheme, listKinds, isvc, sr, ns, secret,
-		)
+		dynamicClient := newModelServingDynamicClient(isvc, sr, ns, secret)
 
 		target := newTestTarget(dynamicClient, "2.25.0", false)
 
@@ -473,21 +375,7 @@ func TestModelMeshToRawAction_PVCConversion(t *testing.T) {
 			"pvc-key": {Type: "pvc", Bucket: "data-pvc", LocalPath: "/model-dir"},
 		})
 
-		scheme := runtime.NewScheme()
-
-		listKinds := map[schema.GroupVersionResource]string{
-			resources.InferenceService.GVR(): resources.InferenceService.ListKind(),
-			resources.ServingRuntime.GVR():   resources.ServingRuntime.ListKind(),
-			resources.ServiceAccount.GVR():   resources.ServiceAccount.ListKind(),
-			resources.Role.GVR():             resources.Role.ListKind(),
-			resources.RoleBinding.GVR():      resources.RoleBinding.ListKind(),
-			resources.Namespace.GVR():        resources.Namespace.ListKind(),
-			resources.Secret.GVR():           resources.Secret.ListKind(),
-		}
-
-		dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
-			scheme, listKinds, isvc, sr, ns, secret,
-		)
+		dynamicClient := newModelServingDynamicClient(isvc, sr, ns, secret)
 
 		target := newTestTarget(dynamicClient, "2.25.0", false)
 
@@ -551,21 +439,7 @@ func TestModelMeshToRawAction_PVCConversion(t *testing.T) {
 			"s3-key": {Type: "s3", Bucket: "my-bucket"},
 		})
 
-		scheme := runtime.NewScheme()
-
-		listKinds := map[schema.GroupVersionResource]string{
-			resources.InferenceService.GVR(): resources.InferenceService.ListKind(),
-			resources.ServingRuntime.GVR():   resources.ServingRuntime.ListKind(),
-			resources.ServiceAccount.GVR():   resources.ServiceAccount.ListKind(),
-			resources.Role.GVR():             resources.Role.ListKind(),
-			resources.RoleBinding.GVR():      resources.RoleBinding.ListKind(),
-			resources.Namespace.GVR():        resources.Namespace.ListKind(),
-			resources.Secret.GVR():           resources.Secret.ListKind(),
-		}
-
-		dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
-			scheme, listKinds, isvc, sr, ns, secret,
-		)
+		dynamicClient := newModelServingDynamicClient(isvc, sr, ns, secret)
 
 		target := newTestTarget(dynamicClient, "2.25.0", false)
 
@@ -606,21 +480,7 @@ func TestModelMeshToRawAction_PVCConversion(t *testing.T) {
 			"pvc-key": {Type: "pvc", Bucket: "pvc-volume", LocalPath: "/pvc-path"},
 		})
 
-		scheme := runtime.NewScheme()
-
-		listKinds := map[schema.GroupVersionResource]string{
-			resources.InferenceService.GVR(): resources.InferenceService.ListKind(),
-			resources.ServingRuntime.GVR():   resources.ServingRuntime.ListKind(),
-			resources.ServiceAccount.GVR():   resources.ServiceAccount.ListKind(),
-			resources.Role.GVR():             resources.Role.ListKind(),
-			resources.RoleBinding.GVR():      resources.RoleBinding.ListKind(),
-			resources.Namespace.GVR():        resources.Namespace.ListKind(),
-			resources.Secret.GVR():           resources.Secret.ListKind(),
-		}
-
-		dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
-			scheme, listKinds, s3ISVC, pvcISVC, sr, ns, secret,
-		)
+		dynamicClient := newModelServingDynamicClient(s3ISVC, pvcISVC, sr, ns, secret)
 
 		target := newTestTarget(dynamicClient, "2.25.0", false)
 
@@ -674,21 +534,7 @@ func TestModelMeshToRawAction_PVCConversion(t *testing.T) {
 			"pvc-key": {Type: "pvc", Bucket: "my-pvc", LocalPath: "/model-dir"},
 		})
 
-		scheme := runtime.NewScheme()
-
-		listKinds := map[schema.GroupVersionResource]string{
-			resources.InferenceService.GVR(): resources.InferenceService.ListKind(),
-			resources.ServingRuntime.GVR():   resources.ServingRuntime.ListKind(),
-			resources.ServiceAccount.GVR():   resources.ServiceAccount.ListKind(),
-			resources.Role.GVR():             resources.Role.ListKind(),
-			resources.RoleBinding.GVR():      resources.RoleBinding.ListKind(),
-			resources.Namespace.GVR():        resources.Namespace.ListKind(),
-			resources.Secret.GVR():           resources.Secret.ListKind(),
-		}
-
-		dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
-			scheme, listKinds, isvc, sr, ns, secret,
-		)
+		dynamicClient := newModelServingDynamicClient(isvc, sr, ns, secret)
 
 		target := newTestTarget(dynamicClient, "2.25.0", true)
 
@@ -722,21 +568,7 @@ func TestModelMeshToRawAction_PVCConversion(t *testing.T) {
 		sr := newServingRuntime(testISVCNamespace, "ovms-runtime", true)
 		ns := newNamespace(testISVCNamespace, nil)
 
-		scheme := runtime.NewScheme()
-
-		listKinds := map[schema.GroupVersionResource]string{
-			resources.InferenceService.GVR(): resources.InferenceService.ListKind(),
-			resources.ServingRuntime.GVR():   resources.ServingRuntime.ListKind(),
-			resources.ServiceAccount.GVR():   resources.ServiceAccount.ListKind(),
-			resources.Role.GVR():             resources.Role.ListKind(),
-			resources.RoleBinding.GVR():      resources.RoleBinding.ListKind(),
-			resources.Namespace.GVR():        resources.Namespace.ListKind(),
-			resources.Secret.GVR():           resources.Secret.ListKind(),
-		}
-
-		dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
-			scheme, listKinds, isvc, sr, ns,
-		)
+		dynamicClient := newModelServingDynamicClient(isvc, sr, ns)
 
 		target := newTestTarget(dynamicClient, "2.25.0", false)
 
@@ -768,21 +600,7 @@ func TestModelMeshToRawAction_PVCConversion(t *testing.T) {
 			"other-key": {Type: "s3", Bucket: "some-bucket"},
 		})
 
-		scheme := runtime.NewScheme()
-
-		listKinds := map[schema.GroupVersionResource]string{
-			resources.InferenceService.GVR(): resources.InferenceService.ListKind(),
-			resources.ServingRuntime.GVR():   resources.ServingRuntime.ListKind(),
-			resources.ServiceAccount.GVR():   resources.ServiceAccount.ListKind(),
-			resources.Role.GVR():             resources.Role.ListKind(),
-			resources.RoleBinding.GVR():      resources.RoleBinding.ListKind(),
-			resources.Namespace.GVR():        resources.Namespace.ListKind(),
-			resources.Secret.GVR():           resources.Secret.ListKind(),
-		}
-
-		dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
-			scheme, listKinds, isvc, sr, ns, secret,
-		)
+		dynamicClient := newModelServingDynamicClient(isvc, sr, ns, secret)
 
 		target := newTestTarget(dynamicClient, "2.25.0", false)
 
@@ -813,21 +631,7 @@ func TestModelMeshToRawAction_PVCConversion(t *testing.T) {
 			"pvc-key": {Type: "pvc", Bucket: "vol", LocalPath: "/path"},
 		})
 
-		scheme := runtime.NewScheme()
-
-		listKinds := map[schema.GroupVersionResource]string{
-			resources.InferenceService.GVR(): resources.InferenceService.ListKind(),
-			resources.ServingRuntime.GVR():   resources.ServingRuntime.ListKind(),
-			resources.ServiceAccount.GVR():   resources.ServiceAccount.ListKind(),
-			resources.Role.GVR():             resources.Role.ListKind(),
-			resources.RoleBinding.GVR():      resources.RoleBinding.ListKind(),
-			resources.Namespace.GVR():        resources.Namespace.ListKind(),
-			resources.Secret.GVR():           resources.Secret.ListKind(),
-		}
-
-		dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
-			scheme, listKinds, isvc, sr, ns, secret,
-		)
+		dynamicClient := newModelServingDynamicClient(isvc, sr, ns, secret)
 
 		target := newTestTarget(dynamicClient, "2.25.0", false)
 
@@ -864,21 +668,7 @@ func TestModelMeshToRawAction_PVCConversion(t *testing.T) {
 			"pvc-key-2": {Type: "pvc", Bucket: "vol2", LocalPath: "/path2"},
 		})
 
-		scheme := runtime.NewScheme()
-
-		listKinds := map[schema.GroupVersionResource]string{
-			resources.InferenceService.GVR(): resources.InferenceService.ListKind(),
-			resources.ServingRuntime.GVR():   resources.ServingRuntime.ListKind(),
-			resources.ServiceAccount.GVR():   resources.ServiceAccount.ListKind(),
-			resources.Role.GVR():             resources.Role.ListKind(),
-			resources.RoleBinding.GVR():      resources.RoleBinding.ListKind(),
-			resources.Namespace.GVR():        resources.Namespace.ListKind(),
-			resources.Secret.GVR():           resources.Secret.ListKind(),
-		}
-
-		dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
-			scheme, listKinds, isvc1, isvc2, sr, ns, secret,
-		)
+		dynamicClient := newModelServingDynamicClient(isvc1, isvc2, sr, ns, secret)
 
 		target := newTestTarget(dynamicClient, "2.25.0", false)
 
@@ -902,5 +692,84 @@ func TestModelMeshToRawAction_PVCConversion(t *testing.T) {
 
 		// Result should contain a failed step for the shared runtime
 		g.Expect(actionResult.HasFailedSteps()).To(BeTrue())
+
+		// Verify runtime keeps --model_name from first ISVC processed
+		updatedSR, err := dynamicClient.Resource(resources.ServingRuntime.GVR()).
+			Namespace(testISVCNamespace).
+			Get(ctx, "shared-runtime", metav1.GetOptions{})
+
+		g.Expect(err).ToNot(HaveOccurred())
+
+		containers, _, _ := unstructured.NestedSlice(updatedSR.Object, "spec", "containers")
+		g.Expect(containers).To(HaveLen(1))
+
+		container := containers[0].(map[string]any)
+		args, ok := container["args"].([]any)
+		g.Expect(ok).To(BeTrue())
+		g.Expect(args).To(ContainElement("--model_name=pvc-model-1"))
+	})
+
+	t.Run("should reject PVC ISVC with empty bucket in storage-config", func(t *testing.T) {
+		g := NewWithT(t)
+		ctx := t.Context()
+
+		isvc := newModelMeshISVCWithStorage(testISVCNamespace, "empty-bucket-model", "ovms-runtime", "bad-key", "path")
+		sr := newServingRuntime(testISVCNamespace, "ovms-runtime", true)
+		ns := newNamespace(testISVCNamespace, nil)
+		secret := newStorageConfigSecret(testISVCNamespace, map[string]storageConfigEntryJSON{
+			"bad-key": {Type: "pvc", Bucket: "", LocalPath: "/model"},
+		})
+
+		dynamicClient := newModelServingDynamicClient(isvc, sr, ns, secret)
+
+		target := newTestTarget(dynamicClient, "2.25.0", false)
+
+		a := &modelserving.ModelMeshToRawAction{}
+		actionResult, err := a.Run().Execute(ctx, target)
+
+		g.Expect(err).ToNot(HaveOccurred())
+		g.Expect(actionResult.HasFailedSteps()).To(BeTrue())
+
+		// ISVC should NOT have storageUri set (validation failed)
+		updated, err := dynamicClient.Resource(resources.InferenceService.GVR()).
+			Namespace(testISVCNamespace).
+			Get(ctx, "empty-bucket-model", metav1.GetOptions{})
+
+		g.Expect(err).ToNot(HaveOccurred())
+
+		_, storageURIFound, _ := unstructured.NestedString(updated.Object, "spec", "predictor", "model", "storageUri")
+		g.Expect(storageURIFound).To(BeFalse())
+	})
+
+	t.Run("should reject PVC ISVC with path traversal in localPath", func(t *testing.T) {
+		g := NewWithT(t)
+		ctx := t.Context()
+
+		isvc := newModelMeshISVCWithStorage(testISVCNamespace, "traversal-model", "ovms-runtime", "bad-key", "path")
+		sr := newServingRuntime(testISVCNamespace, "ovms-runtime", true)
+		ns := newNamespace(testISVCNamespace, nil)
+		secret := newStorageConfigSecret(testISVCNamespace, map[string]storageConfigEntryJSON{
+			"bad-key": {Type: "pvc", Bucket: "my-pvc", LocalPath: "/../../etc/passwd"},
+		})
+
+		dynamicClient := newModelServingDynamicClient(isvc, sr, ns, secret)
+
+		target := newTestTarget(dynamicClient, "2.25.0", false)
+
+		a := &modelserving.ModelMeshToRawAction{}
+		actionResult, err := a.Run().Execute(ctx, target)
+
+		g.Expect(err).ToNot(HaveOccurred())
+		g.Expect(actionResult.HasFailedSteps()).To(BeTrue())
+
+		// ISVC should NOT have storageUri set (validation failed)
+		updated, err := dynamicClient.Resource(resources.InferenceService.GVR()).
+			Namespace(testISVCNamespace).
+			Get(ctx, "traversal-model", metav1.GetOptions{})
+
+		g.Expect(err).ToNot(HaveOccurred())
+
+		_, storageURIFound, _ := unstructured.NestedString(updated.Object, "spec", "predictor", "model", "storageUri")
+		g.Expect(storageURIFound).To(BeFalse())
 	})
 }

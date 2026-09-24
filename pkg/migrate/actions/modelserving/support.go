@@ -14,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 
 	"github.com/opendatahub-io/odh-cli/pkg/migrate/action"
 	"github.com/opendatahub-io/odh-cli/pkg/migrate/action/result"
@@ -104,14 +105,16 @@ const (
 	msgDeleteIstioRouteNF   = "Istio VirtualService %s/%s not found (already cleaned up)"
 
 	// Storage-config constants.
-	storageConfigSecretName = "storage-config"
-	storageTypePVC          = "pvc"
+	storageConfigSecretName  = "storage-config"
+	storageTypePVC           = "pvc"
+	msgPVCStorageNameInvalid = "storage-config PVC name %q is invalid: %s"
 
 	// OVMS single-model constants.
 	ovmsRESTPort              int64 = 8888
 	ovmsGRPCPort              int64 = 8001
 	ovmsReadinessInitialDelay int64 = 5
 	ovmsReadinessPeriod       int64 = 10
+	ovmsSingleModelArgCount         = 4
 )
 
 // inferenceServiceConfig preserves all fields in the inferenceService JSON
@@ -170,7 +173,7 @@ func patchISVCDeploymentMode(
 	isvc *unstructured.Unstructured,
 	newMode string,
 	step action.StepRecorder,
-) {
+) bool {
 	name := isvc.GetName()
 	ns := isvc.GetNamespace()
 	oldMode := getDeploymentMode(isvc)
@@ -178,7 +181,7 @@ func patchISVCDeploymentMode(
 	if target.DryRun {
 		step.Completef(result.StepSkipped, msgPatchDeploymentModeDryRun, ns, name, oldMode, newMode)
 
-		return
+		return true
 	}
 
 	patchData := fmt.Sprintf(`{"metadata":{"annotations":{%q:%q}}}`, annotationDeploymentMode, newMode)
@@ -190,10 +193,12 @@ func patchISVCDeploymentMode(
 	if err != nil {
 		step.Completef(result.StepFailed, msgPatchDeploymentModeFailed, ns, name, err)
 
-		return
+		return false
 	}
 
 	step.Completef(result.StepCompleted, msgPatchDeploymentModeSuccess, ns, name, newMode)
+
+	return true
 }
 
 // getDeploymentMode returns the deployment mode annotation value, or empty string if not set.
@@ -306,7 +311,7 @@ func ensureAuthResources(
 	target action.Target,
 	isvc *unstructured.Unstructured,
 	step action.StepRecorder,
-) {
+) bool {
 	name := isvc.GetName()
 	ns := isvc.GetNamespace()
 
@@ -314,9 +319,11 @@ func ensureAuthResources(
 	roleName := name + authRoleSuffix
 	roleBindingName := name + authRoleBindingSuffix
 
-	ensureServiceAccount(ctx, target, ns, saName, step)
-	ensureRole(ctx, target, ns, roleName, step)
-	ensureRoleBinding(ctx, target, ns, roleBindingName, saName, roleName, step)
+	serviceAccountOK := ensureServiceAccount(ctx, target, ns, saName, step)
+	roleOK := ensureRole(ctx, target, ns, roleName, step)
+	roleBindingOK := ensureRoleBinding(ctx, target, ns, roleBindingName, saName, roleName, step)
+
+	return serviceAccountOK && roleOK && roleBindingOK
 }
 
 func ensureServiceAccount(
@@ -325,25 +332,25 @@ func ensureServiceAccount(
 	namespace string,
 	name string,
 	step action.StepRecorder,
-) {
+) bool {
 	_, err := target.Client.Dynamic().Resource(resources.ServiceAccount.GVR()).
 		Namespace(namespace).
 		Get(ctx, name, metav1.GetOptions{})
 
 	if err == nil {
-		return
+		return true
 	}
 
 	if !apierrors.IsNotFound(err) {
 		step.Recordf("create-sa", "Failed to check ServiceAccount %s/%s: %v", result.StepFailed, namespace, name, err)
 
-		return
+		return false
 	}
 
 	if target.DryRun {
 		step.Recordf("create-sa", "Would create ServiceAccount %s/%s", result.StepSkipped, namespace, name)
 
-		return
+		return true
 	}
 
 	sa := &unstructured.Unstructured{
@@ -364,10 +371,12 @@ func ensureServiceAccount(
 	if err != nil && !apierrors.IsAlreadyExists(err) {
 		step.Recordf("create-sa", "Failed to create ServiceAccount %s/%s: %v", result.StepFailed, namespace, name, err)
 
-		return
+		return false
 	}
 
 	step.Recordf("create-sa", "Created ServiceAccount %s/%s", result.StepCompleted, namespace, name)
+
+	return true
 }
 
 func ensureRole(
@@ -376,25 +385,25 @@ func ensureRole(
 	namespace string,
 	name string,
 	step action.StepRecorder,
-) {
+) bool {
 	_, err := target.Client.Dynamic().Resource(resources.Role.GVR()).
 		Namespace(namespace).
 		Get(ctx, name, metav1.GetOptions{})
 
 	if err == nil {
-		return
+		return true
 	}
 
 	if !apierrors.IsNotFound(err) {
 		step.Recordf("create-role", "Failed to check Role %s/%s: %v", result.StepFailed, namespace, name, err)
 
-		return
+		return false
 	}
 
 	if target.DryRun {
 		step.Recordf("create-role", "Would create Role %s/%s", result.StepSkipped, namespace, name)
 
-		return
+		return true
 	}
 
 	role := &unstructured.Unstructured{
@@ -422,10 +431,12 @@ func ensureRole(
 	if err != nil && !apierrors.IsAlreadyExists(err) {
 		step.Recordf("create-role", "Failed to create Role %s/%s: %v", result.StepFailed, namespace, name, err)
 
-		return
+		return false
 	}
 
 	step.Recordf("create-role", "Created Role %s/%s", result.StepCompleted, namespace, name)
+
+	return true
 }
 
 func ensureRoleBinding(
@@ -436,25 +447,25 @@ func ensureRoleBinding(
 	saName string,
 	roleName string,
 	step action.StepRecorder,
-) {
+) bool {
 	_, err := target.Client.Dynamic().Resource(resources.RoleBinding.GVR()).
 		Namespace(namespace).
 		Get(ctx, name, metav1.GetOptions{})
 
 	if err == nil {
-		return
+		return true
 	}
 
 	if !apierrors.IsNotFound(err) {
 		step.Recordf("create-rolebinding", "Failed to check RoleBinding %s/%s: %v", result.StepFailed, namespace, name, err)
 
-		return
+		return false
 	}
 
 	if target.DryRun {
 		step.Recordf("create-rolebinding", "Would create RoleBinding %s/%s", result.StepSkipped, namespace, name)
 
-		return
+		return true
 	}
 
 	rb := &unstructured.Unstructured{
@@ -487,10 +498,12 @@ func ensureRoleBinding(
 	if err != nil && !apierrors.IsAlreadyExists(err) {
 		step.Recordf("create-rolebinding", "Failed to create RoleBinding %s/%s: %v", result.StepFailed, namespace, name, err)
 
-		return
+		return false
 	}
 
 	step.Recordf("create-rolebinding", "Created RoleBinding %s/%s", result.StepCompleted, namespace, name)
+
+	return true
 }
 
 // hasAuthEnabled returns true if the ISVC has the enable-auth annotation set to "true".
@@ -757,9 +770,8 @@ func deleteIstioRoute(
 
 // storageConfigEntry represents a decoded entry from the storage-config secret.
 type storageConfigEntry struct {
-	Type      string `json:"type"`
-	Bucket    string `json:"bucket"`
-	LocalPath string `json:"localPath"`
+	Type string `json:"type"`
+	Name string `json:"name"`
 }
 
 // getStorageConfigEntry fetches the storage-config secret in the given namespace,
@@ -820,23 +832,43 @@ func getISVCStorageKey(isvc *unstructured.Unstructured) string {
 	return key
 }
 
-// buildPVCStorageURI constructs a KServe-compatible PVC storage URI.
-// Returns an error when the storage-config entry cannot produce a valid URI.
-func buildPVCStorageURI(entry *storageConfigEntry) (string, error) {
-	if entry.Bucket == "" {
-		return "", errors.New("storage-config entry has empty bucket (PVC name)")
+// getISVCStoragePath extracts the model path from an ISVC's spec.
+func getISVCStoragePath(isvc *unstructured.Unstructured) string {
+	storagePath, err := jq.Query[string](isvc, ".spec.predictor.model.storage.path")
+	if err != nil {
+		return ""
 	}
 
-	trimmed := strings.TrimPrefix(entry.LocalPath, "/")
+	return storagePath
+}
+
+// buildPVCStorageURI constructs a KServe-compatible PVC storage URI.
+// Returns an error when the storage-config entry cannot produce a valid URI.
+func buildPVCStorageURI(
+	entry *storageConfigEntry,
+	storagePath string,
+) (string, error) {
+	if entry == nil {
+		return "", errors.New("storage-config entry is nil")
+	}
+
+	if entry.Name == "" {
+		return "", errors.New("storage-config entry has empty name (PVC name)")
+	}
+	if validationErrors := validation.IsDNS1123Subdomain(entry.Name); len(validationErrors) > 0 {
+		return "", fmt.Errorf(msgPVCStorageNameInvalid, entry.Name, strings.Join(validationErrors, "; "))
+	}
+
+	trimmed := strings.TrimLeft(storagePath, "/")
 
 	if trimmed == "" {
-		return fmt.Sprintf("pvc://%s/", entry.Bucket), nil
+		return fmt.Sprintf("pvc://%s/", entry.Name), nil
 	}
 
 	cleaned := path.Clean(trimmed)
 	if cleaned == ".." || strings.HasPrefix(cleaned, "../") {
-		return "", fmt.Errorf("storage-config localPath %q escapes the volume root", entry.LocalPath)
+		return "", fmt.Errorf("ISVC storage path %q escapes the volume root", storagePath)
 	}
 
-	return fmt.Sprintf("pvc://%s/%s", entry.Bucket, cleaned), nil
+	return fmt.Sprintf("pvc://%s/%s", entry.Name, cleaned), nil
 }

@@ -23,6 +23,13 @@ const (
 	testISVCName              = "my-model"
 	testApplicationsNamespace = "redhat-ods-applications"
 	testConfigMapName         = "inferenceservice-config"
+	testOVMSFileSystemPollArg = "--file_system_poll_wait_seconds=0"
+	testOVMSAddressArg        = "--address=0.0.0.0"
+	testOVMSTargetDeviceArg   = "--target_device=CPU"
+	testOVMSMetricsArg        = "--metrics_enable=true"
+	testInvalidPVCName        = "invalid/pvc-name"
+	testRuntimeUpdateFailure  = "runtime update failed"
+	testDeploymentModeFailure = "deployment mode patch failed"
 )
 
 func newISVC(namespace, name, deploymentMode string) *unstructured.Unstructured {
@@ -226,9 +233,9 @@ func newModelMeshISVCWithStorage(namespace, name, runtimeName, storageKey, stora
 
 // storageConfigEntryJSON is a helper to build storage-config secret entries.
 type storageConfigEntryJSON struct {
-	Type      string `json:"type"`
-	Bucket    string `json:"bucket,omitempty"`
-	LocalPath string `json:"localPath,omitempty"`
+	Type   string `json:"type"`
+	Name   string `json:"name,omitempty"`
+	Bucket string `json:"bucket,omitempty"`
 }
 
 // newStorageConfigSecret creates a storage-config secret with the given entries.

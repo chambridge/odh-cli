@@ -1,12 +1,16 @@
 package modelserving_test
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/blang/semver/v4"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/opendatahub-io/odh-cli/pkg/migrate/action"
 	"github.com/opendatahub-io/odh-cli/pkg/migrate/action/result"
@@ -41,6 +45,22 @@ func newModelMeshISVC(namespace, name, runtimeName string) *unstructured.Unstruc
 }
 
 func newServingRuntime(namespace, name string, multiModel bool) *unstructured.Unstructured {
+	return newServingRuntimeWithArgs(namespace, name, multiModel)
+}
+
+func newServingRuntimeWithArgs(namespace, name string, multiModel bool, args ...string) *unstructured.Unstructured {
+	container := map[string]any{
+		"name":  "ovms",
+		"image": "openvino/model_server:latest",
+	}
+	if len(args) > 0 {
+		containerArgs := make([]any, len(args))
+		for i, arg := range args {
+			containerArgs[i] = arg
+		}
+		container["args"] = containerArgs
+	}
+
 	return &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": resources.ServingRuntime.APIVersion(),
@@ -52,10 +72,7 @@ func newServingRuntime(namespace, name string, multiModel bool) *unstructured.Un
 			"spec": map[string]any{
 				"multiModel": multiModel,
 				"containers": []any{
-					map[string]any{
-						"name":  "ovms",
-						"image": "openvino/model_server:latest",
-					},
+					container,
 				},
 			},
 		},
@@ -210,7 +227,7 @@ func TestModelMeshToRawAction_RunExecute(t *testing.T) {
 
 		isvc := newModelMeshISVC(testISVCNamespace, "mm-model-noauth", "ovms-runtime")
 		sr := newServingRuntime(testISVCNamespace, "ovms-runtime", true)
-		ns := newNamespace(testISVCNamespace, nil)
+		ns := newNamespace(testISVCNamespace, map[string]string{"modelmesh-enabled": "true"})
 
 		dynamicClient := newModelServingDynamicClient(isvc, sr, ns)
 
@@ -330,7 +347,7 @@ func TestModelMeshToRawAction_PVCConversion(t *testing.T) {
 		sr := newServingRuntime(testISVCNamespace, "ovms-runtime", true)
 		ns := newNamespace(testISVCNamespace, map[string]string{"modelmesh-enabled": "true"})
 		secret := newStorageConfigSecret(testISVCNamespace, map[string]storageConfigEntryJSON{
-			"my-pvc-key": {Type: "pvc", Bucket: "my-pvc-volume", LocalPath: "/models/my-model"},
+			"my-pvc-key": {Type: "pvc", Name: "my-pvc-volume"},
 		})
 
 		dynamicClient := newModelServingDynamicClient(isvc, sr, ns, secret)
@@ -369,10 +386,19 @@ func TestModelMeshToRawAction_PVCConversion(t *testing.T) {
 		ctx := t.Context()
 
 		isvc := newModelMeshISVCWithStorage(testISVCNamespace, "pvc-model", "ovms-runtime", "pvc-key", "model-dir")
-		sr := newServingRuntime(testISVCNamespace, "ovms-runtime", true)
+		sr := newServingRuntimeWithArgs(
+			testISVCNamespace,
+			"ovms-runtime",
+			true,
+			testOVMSFileSystemPollArg,
+			"--model_name=old-model",
+			testOVMSAddressArg,
+			testOVMSTargetDeviceArg,
+			testOVMSMetricsArg,
+		)
 		ns := newNamespace(testISVCNamespace, nil)
 		secret := newStorageConfigSecret(testISVCNamespace, map[string]storageConfigEntryJSON{
-			"pvc-key": {Type: "pvc", Bucket: "data-pvc", LocalPath: "/model-dir"},
+			"pvc-key": {Type: "pvc", Name: "data-pvc"},
 		})
 
 		dynamicClient := newModelServingDynamicClient(isvc, sr, ns, secret)
@@ -409,6 +435,11 @@ func TestModelMeshToRawAction_PVCConversion(t *testing.T) {
 		g.Expect(args).To(ContainElement("--model_path=/mnt/models"))
 		g.Expect(args).To(ContainElement("--port=8001"))
 		g.Expect(args).To(ContainElement("--rest_port=8888"))
+		g.Expect(args).To(ContainElement(testOVMSFileSystemPollArg))
+		g.Expect(args).To(ContainElement(testOVMSAddressArg))
+		g.Expect(args).To(ContainElement(testOVMSTargetDeviceArg))
+		g.Expect(args).To(ContainElement(testOVMSMetricsArg))
+		g.Expect(args).ToNot(ContainElement("--model_name=old-model"))
 
 		// Verify port 8888
 		ports, ok := container["ports"].([]any)
@@ -467,7 +498,7 @@ func TestModelMeshToRawAction_PVCConversion(t *testing.T) {
 		g.Expect(storageKeyFound).To(BeTrue())
 	})
 
-	t.Run("should handle mixed S3 and PVC ISVCs", func(t *testing.T) {
+	t.Run("should reject mixed S3 and PVC ISVCs sharing a ServingRuntime before mutation", func(t *testing.T) {
 		g := NewWithT(t)
 		ctx := t.Context()
 
@@ -477,7 +508,7 @@ func TestModelMeshToRawAction_PVCConversion(t *testing.T) {
 		ns := newNamespace(testISVCNamespace, nil)
 		secret := newStorageConfigSecret(testISVCNamespace, map[string]storageConfigEntryJSON{
 			"s3-key":  {Type: "s3", Bucket: "s3-bucket"},
-			"pvc-key": {Type: "pvc", Bucket: "pvc-volume", LocalPath: "/pvc-path"},
+			"pvc-key": {Type: "pvc", Name: "pvc-volume"},
 		})
 
 		dynamicClient := newModelServingDynamicClient(s3ISVC, pvcISVC, sr, ns, secret)
@@ -485,11 +516,12 @@ func TestModelMeshToRawAction_PVCConversion(t *testing.T) {
 		target := newTestTarget(dynamicClient, "2.25.0", false)
 
 		a := &modelserving.ModelMeshToRawAction{}
-		_, err := a.Run().Execute(ctx, target)
+		actionResult, err := a.Run().Execute(ctx, target)
 
 		g.Expect(err).ToNot(HaveOccurred())
+		g.Expect(actionResult).ToNot(BeNil())
 
-		// Both should be RawDeployment
+		// Neither ISVC should be mutated when the preflight detects a conflict.
 		for _, name := range []string{"s3-model", "pvc-model"} {
 			updated, getErr := dynamicClient.Resource(resources.InferenceService.GVR()).
 				Namespace(testISVCNamespace).
@@ -498,29 +530,13 @@ func TestModelMeshToRawAction_PVCConversion(t *testing.T) {
 			g.Expect(getErr).ToNot(HaveOccurred())
 
 			annotations := updated.GetAnnotations()
-			g.Expect(annotations).To(HaveKeyWithValue("serving.kserve.io/deploymentMode", "RawDeployment"))
+			g.Expect(annotations).To(HaveKeyWithValue("serving.kserve.io/deploymentMode", "ModelMesh"))
 		}
 
-		// PVC ISVC should have storageUri
-		pvcUpdated, err := dynamicClient.Resource(resources.InferenceService.GVR()).
-			Namespace(testISVCNamespace).
-			Get(ctx, "pvc-model", metav1.GetOptions{})
-
-		g.Expect(err).ToNot(HaveOccurred())
-
-		storageURI, found, _ := unstructured.NestedString(pvcUpdated.Object, "spec", "predictor", "model", "storageUri")
-		g.Expect(found).To(BeTrue())
-		g.Expect(storageURI).To(Equal("pvc://pvc-volume/pvc-path"))
-
-		// S3 ISVC should NOT have storageUri
-		s3Updated, err := dynamicClient.Resource(resources.InferenceService.GVR()).
-			Namespace(testISVCNamespace).
-			Get(ctx, "s3-model", metav1.GetOptions{})
-
-		g.Expect(err).ToNot(HaveOccurred())
-
-		_, s3URIFound, _ := unstructured.NestedString(s3Updated.Object, "spec", "predictor", "model", "storageUri")
-		g.Expect(s3URIFound).To(BeFalse())
+		g.Expect(actionResult.HasFailedSteps()).To(BeTrue())
+		g.Expect(hasStepMessageContaining(
+			actionResult.Status.Steps, result.StepFailed, "ovms-runtime",
+		)).To(BeTrue())
 	})
 
 	t.Run("should surface PVC detection in dry-run mode", func(t *testing.T) {
@@ -531,7 +547,7 @@ func TestModelMeshToRawAction_PVCConversion(t *testing.T) {
 		sr := newServingRuntime(testISVCNamespace, "ovms-runtime", true)
 		ns := newNamespace(testISVCNamespace, map[string]string{"modelmesh-enabled": "true"})
 		secret := newStorageConfigSecret(testISVCNamespace, map[string]storageConfigEntryJSON{
-			"pvc-key": {Type: "pvc", Bucket: "my-pvc", LocalPath: "/model-dir"},
+			"pvc-key": {Type: "pvc", Name: "my-pvc"},
 		})
 
 		dynamicClient := newModelServingDynamicClient(isvc, sr, ns, secret)
@@ -561,6 +577,9 @@ func TestModelMeshToRawAction_PVCConversion(t *testing.T) {
 		// Verify PVC-specific dry-run step was recorded
 		g.Expect(hasStepMessageContaining(
 			actionResult.Status.Steps, result.StepSkipped, "Would set storageUri=",
+		)).To(BeTrue())
+		g.Expect(hasStepMessageContaining(
+			actionResult.Status.Steps, result.StepSkipped, "pvc://my-pvc/model-dir",
 		)).To(BeTrue())
 
 		// Verify detection step recorded PVC-backed count
@@ -686,7 +705,7 @@ func TestModelMeshToRawAction_PVCConversion(t *testing.T) {
 		sr := newServingRuntime(testISVCNamespace, "ovms-runtime", true)
 		ns := newNamespace(testISVCNamespace, nil)
 		secret := newStorageConfigSecret(testISVCNamespace, map[string]storageConfigEntryJSON{
-			"pvc-key": {Type: "pvc", Bucket: "vol", LocalPath: "/path"},
+			"pvc-key": {Type: "pvc", Name: "vol"},
 		})
 
 		dynamicClient := newModelServingDynamicClient(isvc, sr, ns, secret)
@@ -713,7 +732,7 @@ func TestModelMeshToRawAction_PVCConversion(t *testing.T) {
 		g.Expect(annotations).To(HaveKeyWithValue("serving.kserve.io/deploymentMode", "RawDeployment"))
 	})
 
-	t.Run("should warn when multiple PVC ISVCs share a ServingRuntime", func(t *testing.T) {
+	t.Run("should reject multiple PVC ISVCs sharing a ServingRuntime before mutation", func(t *testing.T) {
 		g := NewWithT(t)
 		ctx := t.Context()
 
@@ -722,8 +741,8 @@ func TestModelMeshToRawAction_PVCConversion(t *testing.T) {
 		sr := newServingRuntime(testISVCNamespace, "shared-runtime", true)
 		ns := newNamespace(testISVCNamespace, nil)
 		secret := newStorageConfigSecret(testISVCNamespace, map[string]storageConfigEntryJSON{
-			"pvc-key-1": {Type: "pvc", Bucket: "vol1", LocalPath: "/path1"},
-			"pvc-key-2": {Type: "pvc", Bucket: "vol2", LocalPath: "/path2"},
+			"pvc-key-1": {Type: "pvc", Name: "vol1"},
+			"pvc-key-2": {Type: "pvc", Name: "vol2"},
 		})
 
 		dynamicClient := newModelServingDynamicClient(isvc1, isvc2, sr, ns, secret)
@@ -736,7 +755,7 @@ func TestModelMeshToRawAction_PVCConversion(t *testing.T) {
 		g.Expect(err).ToNot(HaveOccurred())
 		g.Expect(actionResult).ToNot(BeNil())
 
-		// Both ISVCs should still be converted to RawDeployment
+		// Neither ISVC should be mutated when the preflight detects a conflict.
 		for _, name := range []string{"pvc-model-1", "pvc-model-2"} {
 			updated, getErr := dynamicClient.Resource(resources.InferenceService.GVR()).
 				Namespace(testISVCNamespace).
@@ -745,13 +764,13 @@ func TestModelMeshToRawAction_PVCConversion(t *testing.T) {
 			g.Expect(getErr).ToNot(HaveOccurred())
 
 			ann := updated.GetAnnotations()
-			g.Expect(ann).To(HaveKeyWithValue("serving.kserve.io/deploymentMode", "RawDeployment"))
+			g.Expect(ann).To(HaveKeyWithValue("serving.kserve.io/deploymentMode", "ModelMesh"))
 		}
 
 		// Result should contain a failed step for the shared runtime
 		g.Expect(actionResult.HasFailedSteps()).To(BeTrue())
 
-		// Verify runtime keeps --model_name from first ISVC processed
+		// Verify the runtime was not partially patched.
 		updatedSR, err := dynamicClient.Resource(resources.ServingRuntime.GVR()).
 			Namespace(testISVCNamespace).
 			Get(ctx, "shared-runtime", metav1.GetOptions{})
@@ -762,20 +781,21 @@ func TestModelMeshToRawAction_PVCConversion(t *testing.T) {
 		g.Expect(containers).To(HaveLen(1))
 
 		container := containers[0].(map[string]any)
-		args, ok := container["args"].([]any)
-		g.Expect(ok).To(BeTrue())
-		g.Expect(args).To(ContainElement("--model_name=pvc-model-1"))
+		g.Expect(container).ToNot(HaveKey("args"))
+		g.Expect(hasStepMessageContaining(
+			actionResult.Status.Steps, result.StepFailed, "shared-runtime",
+		)).To(BeTrue())
 	})
 
-	t.Run("should reject PVC ISVC with empty bucket in storage-config", func(t *testing.T) {
+	t.Run("should reject PVC ISVC with empty name in storage-config", func(t *testing.T) {
 		g := NewWithT(t)
 		ctx := t.Context()
 
-		isvc := newModelMeshISVCWithStorage(testISVCNamespace, "empty-bucket-model", "ovms-runtime", "bad-key", "path")
+		isvc := newModelMeshISVCWithStorage(testISVCNamespace, "empty-name-model", "ovms-runtime", "bad-key", "path")
 		sr := newServingRuntime(testISVCNamespace, "ovms-runtime", true)
 		ns := newNamespace(testISVCNamespace, nil)
 		secret := newStorageConfigSecret(testISVCNamespace, map[string]storageConfigEntryJSON{
-			"bad-key": {Type: "pvc", Bucket: "", LocalPath: "/model"},
+			"bad-key": {Type: "pvc", Name: ""},
 		})
 
 		dynamicClient := newModelServingDynamicClient(isvc, sr, ns, secret)
@@ -791,23 +811,26 @@ func TestModelMeshToRawAction_PVCConversion(t *testing.T) {
 		// ISVC should NOT have storageUri set (validation failed)
 		updated, err := dynamicClient.Resource(resources.InferenceService.GVR()).
 			Namespace(testISVCNamespace).
-			Get(ctx, "empty-bucket-model", metav1.GetOptions{})
+			Get(ctx, "empty-name-model", metav1.GetOptions{})
 
 		g.Expect(err).ToNot(HaveOccurred())
 
 		_, storageURIFound, _ := unstructured.NestedString(updated.Object, "spec", "predictor", "model", "storageUri")
 		g.Expect(storageURIFound).To(BeFalse())
+		g.Expect(hasStepMessageContaining(
+			actionResult.Status.Steps, result.StepFailed, "Processed 0 of 1 InferenceService(s)",
+		)).To(BeTrue())
 	})
 
-	t.Run("should reject PVC ISVC with path traversal in localPath", func(t *testing.T) {
+	t.Run("should reject PVC ISVC with path traversal in storage path", func(t *testing.T) {
 		g := NewWithT(t)
 		ctx := t.Context()
 
-		isvc := newModelMeshISVCWithStorage(testISVCNamespace, "traversal-model", "ovms-runtime", "bad-key", "path")
+		isvc := newModelMeshISVCWithStorage(testISVCNamespace, "traversal-model", "ovms-runtime", "bad-key", "//../../etc/passwd")
 		sr := newServingRuntime(testISVCNamespace, "ovms-runtime", true)
 		ns := newNamespace(testISVCNamespace, nil)
 		secret := newStorageConfigSecret(testISVCNamespace, map[string]storageConfigEntryJSON{
-			"bad-key": {Type: "pvc", Bucket: "my-pvc", LocalPath: "/../../etc/passwd"},
+			"bad-key": {Type: "pvc", Name: "my-pvc"},
 		})
 
 		dynamicClient := newModelServingDynamicClient(isvc, sr, ns, secret)
@@ -829,5 +852,129 @@ func TestModelMeshToRawAction_PVCConversion(t *testing.T) {
 
 		_, storageURIFound, _ := unstructured.NestedString(updated.Object, "spec", "predictor", "model", "storageUri")
 		g.Expect(storageURIFound).To(BeFalse())
+	})
+
+	t.Run("should reject PVC ISVC with invalid PVC name", func(t *testing.T) {
+		g := NewWithT(t)
+		ctx := t.Context()
+
+		isvc := newModelMeshISVCWithStorage(testISVCNamespace, "invalid-name-model", "ovms-runtime", "bad-key", "path")
+		sr := newServingRuntime(testISVCNamespace, "ovms-runtime", true)
+		ns := newNamespace(testISVCNamespace, nil)
+		secret := newStorageConfigSecret(testISVCNamespace, map[string]storageConfigEntryJSON{
+			"bad-key": {Type: "pvc", Name: testInvalidPVCName},
+		})
+
+		dynamicClient := newModelServingDynamicClient(isvc, sr, ns, secret)
+
+		target := newTestTarget(dynamicClient, "2.25.0", false)
+
+		a := &modelserving.ModelMeshToRawAction{}
+		actionResult, err := a.Run().Execute(ctx, target)
+
+		g.Expect(err).ToNot(HaveOccurred())
+		g.Expect(actionResult.HasFailedSteps()).To(BeTrue())
+		g.Expect(hasStepMessageContaining(
+			actionResult.Status.Steps, result.StepFailed, "Processed 0 of 1 InferenceService(s)",
+		)).To(BeTrue())
+
+		updated, err := dynamicClient.Resource(resources.InferenceService.GVR()).
+			Namespace(testISVCNamespace).
+			Get(ctx, "invalid-name-model", metav1.GetOptions{})
+
+		g.Expect(err).ToNot(HaveOccurred())
+		_, storageURIFound, _ := unstructured.NestedString(updated.Object, "spec", "predictor", "model", "storageUri")
+		g.Expect(storageURIFound).To(BeFalse())
+	})
+
+	t.Run("should fail when PVC ServingRuntime update fails", func(t *testing.T) {
+		g := NewWithT(t)
+		ctx := t.Context()
+
+		isvc := newModelMeshISVCWithStorage(testISVCNamespace, "runtime-update-failure", "ovms-runtime", "pvc-key", "path")
+		sr := newServingRuntime(testISVCNamespace, "ovms-runtime", true)
+		ns := newNamespace(testISVCNamespace, map[string]string{"modelmesh-enabled": "true"})
+		secret := newStorageConfigSecret(testISVCNamespace, map[string]storageConfigEntryJSON{
+			"pvc-key": {Type: "pvc", Name: "model-pvc"},
+		})
+
+		dynamicClient := newModelServingDynamicClient(isvc, sr, ns, secret)
+		dynamicClient.PrependReactor("update", "servingruntimes", func(_ k8stesting.Action) (bool, k8sruntime.Object, error) {
+			return true, nil, apierrors.NewInternalError(errors.New(testRuntimeUpdateFailure))
+		})
+
+		target := newTestTarget(dynamicClient, "2.25.0", false)
+
+		a := &modelserving.ModelMeshToRawAction{}
+		actionResult, err := a.Run().Execute(ctx, target)
+
+		g.Expect(err).ToNot(HaveOccurred())
+		g.Expect(actionResult.HasFailedSteps()).To(BeTrue())
+		g.Expect(hasStepMessageContaining(
+			actionResult.Status.Steps, result.StepFailed, "Processed 0 of 1 InferenceService(s)",
+		)).To(BeTrue())
+
+		updatedNS, err := dynamicClient.Resource(resources.Namespace.GVR()).
+			Get(ctx, testISVCNamespace, metav1.GetOptions{})
+
+		g.Expect(err).ToNot(HaveOccurred())
+		g.Expect(updatedNS.GetLabels()).To(HaveKeyWithValue("modelmesh-enabled", "true"))
+	})
+
+	t.Run("should reject PVC ISVC when its ServingRuntime is missing", func(t *testing.T) {
+		g := NewWithT(t)
+		ctx := t.Context()
+
+		isvc := newModelMeshISVCWithStorage(testISVCNamespace, "missing-runtime", "missing-runtime", "pvc-key", "path")
+		ns := newNamespace(testISVCNamespace, nil)
+		secret := newStorageConfigSecret(testISVCNamespace, map[string]storageConfigEntryJSON{
+			"pvc-key": {Type: "pvc", Name: "model-pvc"},
+		})
+
+		dynamicClient := newModelServingDynamicClient(isvc, ns, secret)
+
+		target := newTestTarget(dynamicClient, "2.25.0", false)
+
+		a := &modelserving.ModelMeshToRawAction{}
+		actionResult, err := a.Run().Execute(ctx, target)
+
+		g.Expect(err).ToNot(HaveOccurred())
+		g.Expect(actionResult.HasFailedSteps()).To(BeTrue())
+		g.Expect(hasStepMessageContaining(
+			actionResult.Status.Steps, result.StepFailed, "missing-runtime is unavailable",
+		)).To(BeTrue())
+
+		updated, err := dynamicClient.Resource(resources.InferenceService.GVR()).
+			Namespace(testISVCNamespace).
+			Get(ctx, "missing-runtime", metav1.GetOptions{})
+
+		g.Expect(err).ToNot(HaveOccurred())
+		_, storageURIFound, _ := unstructured.NestedString(updated.Object, "spec", "predictor", "model", "storageUri")
+		g.Expect(storageURIFound).To(BeFalse())
+	})
+
+	t.Run("should fail when standard ISVC deployment mode patch fails", func(t *testing.T) {
+		g := NewWithT(t)
+		ctx := t.Context()
+
+		isvc := newModelMeshISVC(testISVCNamespace, "standard-patch-failure", "ovms-runtime")
+		sr := newServingRuntime(testISVCNamespace, "ovms-runtime", true)
+		ns := newNamespace(testISVCNamespace, nil)
+
+		dynamicClient := newModelServingDynamicClient(isvc, sr, ns)
+		dynamicClient.PrependReactor("patch", "inferenceservices", func(_ k8stesting.Action) (bool, k8sruntime.Object, error) {
+			return true, nil, apierrors.NewInternalError(errors.New(testDeploymentModeFailure))
+		})
+
+		target := newTestTarget(dynamicClient, "2.25.0", false)
+
+		a := &modelserving.ModelMeshToRawAction{}
+		actionResult, err := a.Run().Execute(ctx, target)
+
+		g.Expect(err).ToNot(HaveOccurred())
+		g.Expect(actionResult.HasFailedSteps()).To(BeTrue())
+		g.Expect(hasStepMessageContaining(
+			actionResult.Status.Steps, result.StepFailed, "Processed 0 of 1 InferenceService(s)",
+		)).To(BeTrue())
 	})
 }

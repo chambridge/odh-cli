@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/util/sets"
 
 	"github.com/opendatahub-io/odh-cli/pkg/backup"
 	"github.com/opendatahub-io/odh-cli/pkg/migrate/action"
@@ -25,21 +27,26 @@ const (
 	msgModelMeshConfirm    = "About to convert %d InferenceService(s) from ModelMesh to RawDeployment"
 	msgModelMeshCancelled  = "User cancelled ModelMesh to RawDeployment conversion"
 	msgModelMeshComplete   = "Processed %d InferenceService(s): %d standard, %d PVC-backed"
+	msgModelMeshFailed     = "Processed %d of %d InferenceService(s): %d standard, %d PVC-backed, %d failed"
 	msgModelMeshDryRun     = "Dry-run: would convert %d InferenceService(s) from ModelMesh to RawDeployment (%d standard, %d PVC-backed)"
 	msgModelMeshBackupDone = "Backed up %d ModelMesh InferenceServices to %s"
 	msgModelMeshNoISVCs    = "No ModelMesh InferenceServices found"
 
-	msgPVCDetected          = "InferenceService %s/%s uses PVC storage (key: %s)"
-	msgPVCClassifyFailed    = "Failed to detect storage type for InferenceService %s/%s: %v (skipped — resolve and retry)"
-	msgPVCRuntimeUpdate     = "Updated ServingRuntime %s/%s with OVMS single-model args, port 8888, readiness probe"
-	msgPVCRuntimeDryRun     = "Would update ServingRuntime %s/%s with OVMS single-model args, port 8888, readiness probe"
-	msgPVCRuntimeFailed     = "Failed to update ServingRuntime %s/%s for PVC single-model: %v"
-	msgPVCRuntimeShared     = "ServingRuntime %s/%s is already patched for another PVC InferenceService; --model_name keeps the first ISVC processed. Create a dedicated ServingRuntime for %s/%s"
-	msgPVCStorageURIInvalid = "Failed to build storageUri for InferenceService %s/%s: %v"
-	msgPVCStorageURISet     = "Set storageUri=%s and deploymentMode=RawDeployment on InferenceService %s/%s"
-	msgPVCStorageURIDryRun  = "Would set storageUri=%s and deploymentMode=RawDeployment on InferenceService %s/%s"
-	msgPVCStorageURIFailed  = "Failed to update InferenceService %s/%s for PVC conversion: %v"
-	msgPVCConversionAborted = "Skipping remaining steps for InferenceService %s/%s due to PVC conversion failure"
+	msgPVCDetected                  = "InferenceService %s/%s uses PVC storage %s (key: %s)"
+	msgPVCClassifyFailed            = "Failed to detect storage type for InferenceService %s/%s: %v (skipped — resolve and retry)"
+	msgPVCRuntimeUpdate             = "Updated ServingRuntime %s/%s with OVMS single-model args, port 8888, readiness probe"
+	msgPVCRuntimeDryRun             = "Would update ServingRuntime %s/%s with OVMS single-model args, port 8888, readiness probe"
+	msgPVCRuntimeFailed             = "Failed to update ServingRuntime %s/%s for PVC single-model: %v"
+	msgRuntimeReferenceFailed       = "Failed to read ServingRuntime reference for InferenceService %s/%s: %v"
+	msgPVCRuntimeNoContainer        = "ServingRuntime %s/%s has no containers"
+	msgPVCRuntimeInvalidContainer   = "ServingRuntime %s/%s has an invalid container"
+	msgPVCServingRuntimeUnavailable = "Cannot convert InferenceService %s/%s: ServingRuntime %s/%s is unavailable: %v"
+	msgPVCStorageURIInvalid         = "Failed to build storageUri for InferenceService %s/%s: %v"
+	msgPVCStorageURISet             = "Set storageUri=%s and deploymentMode=RawDeployment on InferenceService %s/%s"
+	msgPVCStorageURIDryRun          = "Would set storageUri=%s and deploymentMode=RawDeployment on InferenceService %s/%s"
+	msgPVCStorageURIFailed          = "Failed to update InferenceService %s/%s for PVC conversion: %v"
+	msgPVCConversionAborted         = "Skipping remaining steps for InferenceService %s/%s due to PVC conversion failure"
+	msgPVCConflictingRuntime        = "Cannot convert PVC-backed InferenceServices sharing ServingRuntime(s): %s; assign each model a dedicated ServingRuntime"
 )
 
 // ModelMeshToRawAction converts InferenceServices from ModelMesh to RawDeployment mode.
@@ -116,6 +123,10 @@ func (a *ModelMeshToRawAction) convertISVCs(
 		detectionStep.Completef(result.StepCompleted, "Detected %d standard and %d PVC-backed InferenceService(s)", len(standardISVCs), len(pvcISVCs))
 	}
 
+	if !validatePVCServingRuntimeAssignments(ctx, target, standardISVCs, pvcISVCs, step) {
+		return
+	}
+
 	// Confirm with user
 	if !target.SkipConfirm && !target.DryRun {
 		target.IO.Fprintln()
@@ -132,30 +143,68 @@ func (a *ModelMeshToRawAction) convertISVCs(
 		}
 	}
 
-	var (
-		standardCount       int
-		pvcCount            int
-		processedNamespaces = make(map[string]bool)
-		patchedRuntimes     = make(map[string]bool)
-	)
+	processedNamespaces := make(map[string]bool)
+	standardCount, standardFailedCount := a.convertStandardISVCs(ctx, target, standardISVCs, step, processedNamespaces)
+	pvcCount, pvcFailedCount := a.convertPVCISVCs(ctx, target, pvcISVCs, step, processedNamespaces)
 
-	// Convert standard (S3/HDFS) ISVCs
-	for _, isvc := range standardISVCs {
-		isvcStep := step.Child(
+	// Remove modelmesh-enabled label from processed namespaces
+	for ns := range processedNamespaces {
+		removeModelMeshLabel(ctx, target, ns, step)
+	}
+
+	total := standardCount + pvcCount
+	failedCount := skippedCount + standardFailedCount + pvcFailedCount
+
+	if failedCount > 0 {
+		step.Completef(result.StepFailed, msgModelMeshFailed, total, len(isvcs), standardCount, pvcCount, failedCount)
+	} else if target.DryRun {
+		step.Completef(result.StepSkipped, msgModelMeshDryRun, total, standardCount, pvcCount)
+	} else {
+		step.Completef(result.StepCompleted, msgModelMeshComplete, total, standardCount, pvcCount)
+	}
+}
+
+func (a *ModelMeshToRawAction) convertStandardISVCs(
+	ctx context.Context,
+	target action.Target,
+	isvcs []*unstructured.Unstructured,
+	parentStep action.StepRecorder,
+	processedNamespaces map[string]bool,
+) (int, int) {
+	var converted, failed int
+
+	for _, isvc := range isvcs {
+		isvcStep := parentStep.Child(
 			fmt.Sprintf("convert-%s-%s", isvc.GetNamespace(), isvc.GetName()),
 			fmt.Sprintf("Convert %s/%s", isvc.GetNamespace(), isvc.GetName()),
 		)
 
-		a.updateServingRuntime(ctx, target, isvc, isvcStep)
-		patchISVCDeploymentMode(ctx, target, isvc, deploymentModeRawDeployment, isvcStep)
-		finalizeISVCConversion(ctx, target, isvc, isvcStep, processedNamespaces)
+		runtimeOK := a.updateServingRuntime(ctx, target, isvc, isvcStep)
+		deploymentModeOK := patchISVCDeploymentMode(ctx, target, isvc, deploymentModeRawDeployment, isvcStep)
+		authOK := finalizeISVCConversion(ctx, target, isvc, isvcStep)
 
-		standardCount++
+		if runtimeOK && deploymentModeOK && authOK {
+			processedNamespaces[isvc.GetNamespace()] = true
+			converted++
+		} else {
+			failed++
+		}
 	}
 
-	// Convert PVC-backed ISVCs
+	return converted, failed
+}
+
+func (a *ModelMeshToRawAction) convertPVCISVCs(
+	ctx context.Context,
+	target action.Target,
+	pvcISVCs []pvcISVCInfo,
+	parentStep action.StepRecorder,
+	processedNamespaces map[string]bool,
+) (int, int) {
+	var converted, failed int
+
 	for _, pi := range pvcISVCs {
-		isvcStep := step.Child(
+		isvcStep := parentStep.Child(
 			fmt.Sprintf("convert-pvc-%s-%s", pi.isvc.GetNamespace(), pi.isvc.GetName()),
 			fmt.Sprintf("Convert PVC-backed %s/%s", pi.isvc.GetNamespace(), pi.isvc.GetName()),
 		)
@@ -164,10 +213,11 @@ func (a *ModelMeshToRawAction) convertISVCs(
 			"pvc-detected-"+pi.isvc.GetName(),
 			msgPVCDetected,
 			result.StepCompleted,
-			pi.isvc.GetNamespace(), pi.isvc.GetName(), pi.storageKey,
+			pi.isvc.GetNamespace(), pi.isvc.GetName(), pi.entry.Name, pi.storageKey,
 		)
 
-		if !a.convertPVCISVC(ctx, target, pi, isvcStep, patchedRuntimes) {
+		if !a.convertPVCISVC(ctx, target, pi, isvcStep) || !finalizeISVCConversion(ctx, target, pi.isvc, isvcStep) {
+			failed++
 			isvcStep.Recordf(
 				"pvc-aborted-"+pi.isvc.GetName(),
 				msgPVCConversionAborted,
@@ -178,23 +228,72 @@ func (a *ModelMeshToRawAction) convertISVCs(
 			continue
 		}
 
-		finalizeISVCConversion(ctx, target, pi.isvc, isvcStep, processedNamespaces)
-
-		pvcCount++
+		processedNamespaces[pi.isvc.GetNamespace()] = true
+		converted++
 	}
 
-	// Remove modelmesh-enabled label from processed namespaces
-	for ns := range processedNamespaces {
-		removeModelMeshLabel(ctx, target, ns, step)
+	return converted, failed
+}
+
+func validatePVCServingRuntimeAssignments(
+	ctx context.Context,
+	target action.Target,
+	standardISVCs []*unstructured.Unstructured,
+	pvcISVCs []pvcISVCInfo,
+	parentStep action.StepRecorder,
+) bool {
+	if len(pvcISVCs) == 0 {
+		return true
 	}
 
-	total := standardCount + pvcCount
+	runtimeValidationStep := parentStep.Child(
+		"validate-pvc-runtimes",
+		"Validate ServingRuntime assignments for PVC-backed InferenceServices",
+	)
+	conflictingRuntimes := findPVCServingRuntimeConflicts(standardISVCs, pvcISVCs)
+	if len(conflictingRuntimes) > 0 {
+		message := fmt.Sprintf(msgPVCConflictingRuntime, strings.Join(conflictingRuntimes, ", "))
+		runtimeValidationStep.Completef(result.StepFailed, "%s", message)
+		parentStep.Completef(result.StepFailed, "%s", message)
 
-	if target.DryRun {
-		step.Completef(result.StepSkipped, msgModelMeshDryRun, total, standardCount, pvcCount)
-	} else {
-		step.Completef(result.StepCompleted, msgModelMeshComplete, total, standardCount, pvcCount)
+		return false
 	}
+
+	validatedRuntimes := sets.New[string]()
+	for _, pi := range pvcISVCs {
+		runtimeName, err := jq.Query[string](pi.isvc, ".spec.predictor.model.runtime")
+		if err != nil {
+			message := fmt.Sprintf(msgRuntimeReferenceFailed, pi.isvc.GetNamespace(), pi.isvc.GetName(), err)
+			runtimeValidationStep.Completef(result.StepFailed, "%s", message)
+			parentStep.Completef(result.StepFailed, "%s", message)
+
+			return false
+		}
+
+		runtimeKey := pi.isvc.GetNamespace() + "/" + runtimeName
+		if validatedRuntimes.Has(runtimeKey) {
+			continue
+		}
+
+		if _, err := target.Client.Dynamic().Resource(resources.ServingRuntime.GVR()).
+			Namespace(pi.isvc.GetNamespace()).
+			Get(ctx, runtimeName, metav1.GetOptions{}); err != nil {
+			message := fmt.Sprintf(
+				msgPVCServingRuntimeUnavailable,
+				pi.isvc.GetNamespace(), pi.isvc.GetName(), pi.isvc.GetNamespace(), runtimeName, err,
+			)
+			runtimeValidationStep.Completef(result.StepFailed, "%s", message)
+			parentStep.Completef(result.StepFailed, "%s", message)
+
+			return false
+		}
+
+		validatedRuntimes.Insert(runtimeKey)
+	}
+
+	runtimeValidationStep.Completef(result.StepCompleted, "No conflicting ServingRuntime assignments found")
+
+	return true
 }
 
 func (a *ModelMeshToRawAction) updateServingRuntime(
@@ -202,10 +301,17 @@ func (a *ModelMeshToRawAction) updateServingRuntime(
 	target action.Target,
 	isvc *unstructured.Unstructured,
 	parentStep action.StepRecorder,
-) {
+) bool {
 	runtimeName, err := jq.Query[string](isvc, ".spec.predictor.model.runtime")
 	if err != nil {
-		return
+		parentStep.Recordf(
+			"runtime-reference-"+isvc.GetName(),
+			msgRuntimeReferenceFailed,
+			result.StepFailed,
+			isvc.GetNamespace(), isvc.GetName(), err,
+		)
+
+		return false
 	}
 
 	ns := isvc.GetNamespace()
@@ -222,7 +328,7 @@ func (a *ModelMeshToRawAction) updateServingRuntime(
 	if err != nil {
 		step.Completef(result.StepSkipped, "ServingRuntime %s/%s not found (skipped)", ns, runtimeName)
 
-		return
+		return true
 	}
 
 	// Check if multi-model
@@ -230,26 +336,26 @@ func (a *ModelMeshToRawAction) updateServingRuntime(
 	if err != nil || !multiModel {
 		step.Completef(result.StepSkipped, "ServingRuntime %s/%s is not multi-model (skipped)", ns, runtimeName)
 
-		return
+		return true
 	}
 
 	if target.DryRun {
 		step.Completef(result.StepSkipped, "Would update ServingRuntime %s/%s for RawDeployment (multiModel=false, rename container to %s)", ns, runtimeName, kserveContainerName)
 
-		return
+		return true
 	}
 
 	if err := jq.Transform(runtime, ".spec.multiModel = false"); err != nil {
 		step.Completef(result.StepFailed, "Failed to update ServingRuntime %s/%s: %v", ns, runtimeName, err)
 
-		return
+		return false
 	}
 
 	// KServe RawDeployment requires a container named "kserve-container"
 	if err := jq.Transform(runtime, ".spec.containers[0].name = %q", kserveContainerName); err != nil {
 		step.Completef(result.StepFailed, "Failed to rename container in ServingRuntime %s/%s: %v", ns, runtimeName, err)
 
-		return
+		return false
 	}
 
 	_, err = target.Client.Dynamic().Resource(resources.ServingRuntime.GVR()).
@@ -259,10 +365,12 @@ func (a *ModelMeshToRawAction) updateServingRuntime(
 	if err != nil {
 		step.Completef(result.StepFailed, "Failed to update ServingRuntime %s/%s: %v", ns, runtimeName, err)
 
-		return
+		return false
 	}
 
 	step.Completef(result.StepCompleted, "Updated ServingRuntime %s/%s (multiModel=false, container renamed to %s)", ns, runtimeName, kserveContainerName)
+
+	return true
 }
 
 // finalizeISVCConversion handles auth resources and namespace tracking common to all ISVC conversions.
@@ -271,27 +379,27 @@ func finalizeISVCConversion(
 	target action.Target,
 	isvc *unstructured.Unstructured,
 	step action.StepRecorder,
-	processedNamespaces map[string]bool,
-) {
+) bool {
 	if hasAuthEnabled(isvc) {
-		ensureAuthResources(ctx, target, isvc, step)
-	} else {
-		step.Recordf(
-			"auth-skip-"+isvc.GetName(),
-			msgAuthSkipped,
-			result.StepSkipped,
-			isvc.GetNamespace(), isvc.GetName(),
-		)
+		return ensureAuthResources(ctx, target, isvc, step)
 	}
 
-	processedNamespaces[isvc.GetNamespace()] = true
+	step.Recordf(
+		"auth-skip-"+isvc.GetName(),
+		msgAuthSkipped,
+		result.StepSkipped,
+		isvc.GetNamespace(), isvc.GetName(),
+	)
+
+	return true
 }
 
 // pvcISVCInfo holds a PVC-backed ISVC with its resolved storage config.
 type pvcISVCInfo struct {
-	isvc       *unstructured.Unstructured
-	storageKey string
-	entry      *storageConfigEntry
+	isvc        *unstructured.Unstructured
+	storageKey  string
+	storagePath string
+	entry       *storageConfigEntry
 }
 
 // classifyISVCsByStorageType splits ISVCs into standard (S3/HDFS) and PVC-backed.
@@ -333,13 +441,51 @@ func (a *ModelMeshToRawAction) classifyISVCsByStorageType(
 		}
 
 		pvcBacked = append(pvcBacked, pvcISVCInfo{
-			isvc:       isvc,
-			storageKey: storageKey,
-			entry:      entry,
+			isvc:        isvc,
+			storageKey:  storageKey,
+			storagePath: getISVCStoragePath(isvc),
+			entry:       entry,
 		})
 	}
 
 	return standard, pvcBacked
+}
+
+func findPVCServingRuntimeConflicts(
+	standardISVCs []*unstructured.Unstructured,
+	pvcISVCs []pvcISVCInfo,
+) []string {
+	standardRuntimes := sets.New[string]()
+	for _, isvc := range standardISVCs {
+		if runtimeKey := getServingRuntimeKey(isvc); runtimeKey != "" {
+			standardRuntimes.Insert(runtimeKey)
+		}
+	}
+
+	pvcRuntimeCounts := make(map[string]int)
+	for _, pi := range pvcISVCs {
+		if runtimeKey := getServingRuntimeKey(pi.isvc); runtimeKey != "" {
+			pvcRuntimeCounts[runtimeKey]++
+		}
+	}
+
+	conflicts := sets.New[string]()
+	for runtimeKey, count := range pvcRuntimeCounts {
+		if count > 1 || standardRuntimes.Has(runtimeKey) {
+			conflicts.Insert(runtimeKey)
+		}
+	}
+
+	return sets.List(conflicts)
+}
+
+func getServingRuntimeKey(isvc *unstructured.Unstructured) string {
+	runtimeName, err := jq.Query[string](isvc, ".spec.predictor.model.runtime")
+	if err != nil || runtimeName == "" {
+		return ""
+	}
+
+	return isvc.GetNamespace() + "/" + runtimeName
 }
 
 // convertPVCISVC rewrites an ISVC's storage and deployment mode for PVC-backed models,
@@ -349,12 +495,11 @@ func (a *ModelMeshToRawAction) convertPVCISVC(
 	target action.Target,
 	pi pvcISVCInfo,
 	step action.StepRecorder,
-	patchedRuntimes map[string]bool,
 ) bool {
 	ns := pi.isvc.GetNamespace()
 	name := pi.isvc.GetName()
 
-	storageURI, err := buildPVCStorageURI(pi.entry)
+	storageURI, err := buildPVCStorageURI(pi.entry, pi.storagePath)
 	if err != nil {
 		step.Recordf("pvc-storageuri-"+name, msgPVCStorageURIInvalid, result.StepFailed, ns, name, err)
 
@@ -363,9 +508,8 @@ func (a *ModelMeshToRawAction) convertPVCISVC(
 
 	if target.DryRun {
 		step.Recordf("pvc-storageuri-"+name, msgPVCStorageURIDryRun, result.StepSkipped, storageURI, ns, name)
-		a.updateServingRuntimeForPVC(ctx, target, pi.isvc, step, patchedRuntimes)
 
-		return true
+		return a.updateServingRuntimeForPVC(ctx, target, pi.isvc, step)
 	}
 
 	if err := jq.Transform(pi.isvc, ".spec.predictor.model.storageUri = %q", storageURI); err != nil {
@@ -397,105 +541,105 @@ func (a *ModelMeshToRawAction) convertPVCISVC(
 
 	step.Recordf("pvc-storageuri-"+name, msgPVCStorageURISet, result.StepCompleted, storageURI, ns, name)
 
-	a.updateServingRuntimeForPVC(ctx, target, pi.isvc, step, patchedRuntimes)
-
-	return true
+	return a.updateServingRuntimeForPVC(ctx, target, pi.isvc, step)
 }
 
 // updateServingRuntimeForPVC patches a ServingRuntime for PVC single-model OVMS deployment:
-// sets multiModel=false, renames container, replaces args, adds port 8888 and readiness probe.
+// sets multiModel=false, renames the container, updates model args, and adds port 8888 and readiness probe.
 func (a *ModelMeshToRawAction) updateServingRuntimeForPVC(
 	ctx context.Context,
 	target action.Target,
 	isvc *unstructured.Unstructured,
 	parentStep action.StepRecorder,
-	patchedRuntimes map[string]bool,
-) {
+) bool {
 	runtimeName, err := jq.Query[string](isvc, ".spec.predictor.model.runtime")
 	if err != nil {
-		return
+		parentStep.Recordf(
+			"pvc-runtime-reference-"+isvc.GetName(),
+			msgRuntimeReferenceFailed,
+			result.StepFailed,
+			isvc.GetNamespace(), isvc.GetName(), err,
+		)
+
+		return false
 	}
 
 	ns := isvc.GetNamespace()
 	isvcName := isvc.GetName()
-	runtimeKey := ns + "/" + runtimeName
 
 	step := parentStep.Child(
 		fmt.Sprintf("update-pvc-runtime-%s-%s", ns, runtimeName),
 		fmt.Sprintf("Update ServingRuntime %s/%s for PVC single-model", ns, runtimeName),
 	)
 
-	if patchedRuntimes[runtimeKey] {
-		step.Completef(result.StepFailed, msgPVCRuntimeShared, ns, runtimeName, ns, isvcName)
-
-		return
-	}
-
 	runtime, err := target.Client.Dynamic().Resource(resources.ServingRuntime.GVR()).
 		Namespace(ns).
 		Get(ctx, runtimeName, metav1.GetOptions{})
 	if err != nil {
-		step.Completef(result.StepSkipped, "ServingRuntime %s/%s not found (skipped)", ns, runtimeName)
+		step.Completef(result.StepFailed, msgPVCRuntimeFailed, ns, runtimeName, err)
 
-		return
+		return false
 	}
 
 	if target.DryRun {
 		step.Completef(result.StepSkipped, msgPVCRuntimeDryRun, ns, runtimeName)
-		patchedRuntimes[runtimeKey] = true
 
-		return
+		return true
 	}
 
 	// Set multiModel=false
 	if err := jq.Transform(runtime, ".spec.multiModel = false"); err != nil {
 		step.Completef(result.StepFailed, msgPVCRuntimeFailed, ns, runtimeName, err)
 
-		return
+		return false
 	}
 
 	// Rename container to kserve-container
 	if err := jq.Transform(runtime, ".spec.containers[0].name = %q", kserveContainerName); err != nil {
 		step.Completef(result.StepFailed, msgPVCRuntimeFailed, ns, runtimeName, err)
 
-		return
+		return false
 	}
 
 	// Replace container args with single-model OVMS args
 	containers, _, _ := unstructured.NestedSlice(runtime.Object, "spec", "containers")
-	if len(containers) > 0 {
-		container, ok := containers[0].(map[string]any)
-		if ok {
-			container["args"] = []any{
-				"--model_name=" + isvcName,
-				"--model_path=/mnt/models",
-				fmt.Sprintf("--port=%d", ovmsGRPCPort),
-				fmt.Sprintf("--rest_port=%d", ovmsRESTPort),
-			}
+	if len(containers) == 0 {
+		step.Completef(result.StepFailed, msgPVCRuntimeNoContainer, ns, runtimeName)
 
-			container["ports"] = []any{
-				map[string]any{
-					"containerPort": ovmsRESTPort,
-					"protocol":      "TCP",
-				},
-			}
+		return false
+	}
 
-			container["readinessProbe"] = map[string]any{
-				"tcpSocket": map[string]any{
-					"port": ovmsRESTPort,
-				},
-				"initialDelaySeconds": ovmsReadinessInitialDelay,
-				"periodSeconds":       ovmsReadinessPeriod,
-			}
+	container, ok := containers[0].(map[string]any)
+	if !ok {
+		step.Completef(result.StepFailed, msgPVCRuntimeInvalidContainer, ns, runtimeName)
 
-			containers[0] = container
+		return false
+	}
 
-			if err := unstructured.SetNestedSlice(runtime.Object, containers, "spec", "containers"); err != nil {
-				step.Completef(result.StepFailed, msgPVCRuntimeFailed, ns, runtimeName, err)
+	containerArgs, _ := container["args"].([]any)
+	container["args"] = buildSingleModelOVMSArgs(containerArgs, isvcName)
 
-				return
-			}
-		}
+	container["ports"] = []any{
+		map[string]any{
+			"containerPort": ovmsRESTPort,
+			"protocol":      "TCP",
+		},
+	}
+
+	container["readinessProbe"] = map[string]any{
+		"tcpSocket": map[string]any{
+			"port": ovmsRESTPort,
+		},
+		"initialDelaySeconds": ovmsReadinessInitialDelay,
+		"periodSeconds":       ovmsReadinessPeriod,
+	}
+
+	containers[0] = container
+
+	if err := unstructured.SetNestedSlice(runtime.Object, containers, "spec", "containers"); err != nil {
+		step.Completef(result.StepFailed, msgPVCRuntimeFailed, ns, runtimeName, err)
+
+		return false
 	}
 
 	_, err = target.Client.Dynamic().Resource(resources.ServingRuntime.GVR()).
@@ -504,12 +648,41 @@ func (a *ModelMeshToRawAction) updateServingRuntimeForPVC(
 	if err != nil {
 		step.Completef(result.StepFailed, msgPVCRuntimeFailed, ns, runtimeName, err)
 
-		return
+		return false
 	}
 
-	patchedRuntimes[runtimeKey] = true
-
 	step.Completef(result.StepCompleted, msgPVCRuntimeUpdate, ns, runtimeName)
+
+	return true
+}
+
+func buildSingleModelOVMSArgs(existingArgs []any, isvcName string) []any {
+	args := make([]any, 0, len(existingArgs)+ovmsSingleModelArgCount)
+	for _, arg := range existingArgs {
+		argString, ok := arg.(string)
+		if !ok {
+			args = append(args, arg)
+
+			continue
+		}
+
+		switch {
+		case strings.HasPrefix(argString, "--model_name="),
+			strings.HasPrefix(argString, "--model_path="),
+			strings.HasPrefix(argString, "--port="),
+			strings.HasPrefix(argString, "--rest_port="):
+			continue
+		default:
+			args = append(args, arg)
+		}
+	}
+
+	return append(args,
+		"--model_name="+isvcName,
+		"--model_path=/mnt/models",
+		fmt.Sprintf("--port=%d", ovmsGRPCPort),
+		fmt.Sprintf("--rest_port=%d", ovmsRESTPort),
+	)
 }
 
 // --- Prepare Task ---
